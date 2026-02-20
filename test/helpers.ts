@@ -56,13 +56,20 @@ export async function startTestServer(): Promise<TestServer> {
 
   // Wait for server ready.
   const deadline = Date.now() + 10000;
+  let ready = false;
   while (Date.now() < deadline) {
     try {
       await tryListQueues(addr);
+      ready = true;
       break;
     } catch {
       await sleep(50);
     }
+  }
+  if (!ready) {
+    proc.kill();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    throw new Error(`fila-server failed to start within 10s on ${addr}`);
   }
 
   // Load admin proto for queue creation.
