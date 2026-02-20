@@ -1,0 +1,31 @@
+{
+  "name": "@fila/client",
+  "version": "0.1.0",
+  "description": "JavaScript/TypeScript client SDK for the Fila message broker",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "files": [
+    "dist/",
+    "proto/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint src/ test/",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "generate": "proto-loader-gen-types --longs=String --enums=String --defaults --oneofs --grpcLib=@grpc/grpc-js --outDir=generated/ proto/fila/v1/messages.proto proto/fila/v1/service.proto proto/fila/v1/admin.proto"
+  },
+  "license": "AGPL-3.0-or-later",
+  "dependencies": {
+    "@grpc/grpc-js": "^1.12.0",
+    "@grpc/proto-loader": "^0.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "@eslint/js": "^9.0.0",
+    "typescript-eslint": "^8.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
