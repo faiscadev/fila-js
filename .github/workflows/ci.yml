@@ -27,6 +27,21 @@ jobs:
           node-version: "22"
       - run: npm ci
       - run: npm run build
-      # Integration tests require a fila-server binary.
-      # Tests are skipped if the binary is not found.
+      # Build fila-server for integration tests
+      - uses: actions/checkout@v4
+        with:
+          repository: faiscadev/fila
+          path: fila
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            fila/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: fila-server-${{ runner.os }}-${{ hashFiles('fila/Cargo.lock') }}
+          restore-keys: fila-server-${{ runner.os }}-
+      - run: cargo build --release -p fila-server --manifest-path fila/Cargo.toml
       - run: npm test
+        env:
+          FILA_SERVER_BIN: ${{ github.workspace }}/fila/target/release/fila-server
