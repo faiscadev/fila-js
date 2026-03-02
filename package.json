@@ -2,6 +2,10 @@
   "name": "fila-client",
   "version": "0.1.0",
   "description": "JavaScript/TypeScript client SDK for the Fila message broker",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/faiscadev/fila-js"
+  },
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "files": [
