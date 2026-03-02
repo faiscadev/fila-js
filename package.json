@@ -1,5 +1,5 @@
 {
-  "name": "fila-js",
+  "name": "fila-client",
   "version": "0.1.0",
   "description": "JavaScript/TypeScript client SDK for the Fila message broker",
   "main": "dist/src/index.js",
