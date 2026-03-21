@@ -4,8 +4,10 @@ import type { QueueInfo as _fila_v1_QueueInfo, QueueInfo__Output as _fila_v1_Que
 
 export interface ListQueuesResponse {
   'queues'?: (_fila_v1_QueueInfo)[];
+  'clusterNodeCount'?: (number);
 }
 
 export interface ListQueuesResponse__Output {
   'queues': (_fila_v1_QueueInfo__Output)[];
+  'clusterNodeCount': (number);
 }

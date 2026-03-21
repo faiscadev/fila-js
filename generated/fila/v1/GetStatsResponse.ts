@@ -12,6 +12,8 @@ export interface GetStatsResponse {
   'quantum'?: (number);
   'perKeyStats'?: (_fila_v1_PerFairnessKeyStats)[];
   'perThrottleStats'?: (_fila_v1_PerThrottleKeyStats)[];
+  'leaderNodeId'?: (number | string | Long);
+  'replicationCount'?: (number);
 }
 
 export interface GetStatsResponse__Output {
@@ -22,4 +24,6 @@ export interface GetStatsResponse__Output {
   'quantum': (number);
   'perKeyStats': (_fila_v1_PerFairnessKeyStats__Output)[];
   'perThrottleStats': (_fila_v1_PerThrottleKeyStats__Output)[];
+  'leaderNodeId': (string);
+  'replicationCount': (number);
 }

@@ -38,11 +38,91 @@ for await (const msg of client.consume("my-queue")) {
 client.close();
 ```
 
+### TLS (system trust store)
+
+If the Fila server uses a certificate signed by a public CA, enable TLS without providing a CA certificate — the OS system trust store is used automatically:
+
+```typescript
+import { Client } from "@fila/client";
+
+const client = new Client("localhost:5555", { tls: true });
+```
+
+### TLS (custom CA certificate)
+
+For self-signed or private CA certificates, pass the CA cert explicitly:
+
+```typescript
+import * as fs from "fs";
+import { Client } from "@fila/client";
+
+const client = new Client("localhost:5555", {
+  caCert: fs.readFileSync("ca.pem"),
+});
+```
+
+### Mutual TLS (mTLS)
+
+Client certificates work with both modes — system trust store or custom CA:
+
+```typescript
+import * as fs from "fs";
+import { Client } from "@fila/client";
+
+// With custom CA:
+const client = new Client("localhost:5555", {
+  caCert: fs.readFileSync("ca.pem"),
+  clientCert: fs.readFileSync("client.pem"),
+  clientKey: fs.readFileSync("client.key"),
+});
+
+// With system trust store:
+const client2 = new Client("localhost:5555", {
+  tls: true,
+  clientCert: fs.readFileSync("client.pem"),
+  clientKey: fs.readFileSync("client.key"),
+});
+```
+
+### API key authentication
+
+```typescript
+import { Client } from "@fila/client";
+
+const client = new Client("localhost:5555", {
+  apiKey: "my-api-key",
+});
+```
+
+### mTLS + API key
+
+```typescript
+import * as fs from "fs";
+import { Client } from "@fila/client";
+
+const client = new Client("localhost:5555", {
+  caCert: fs.readFileSync("ca.pem"),
+  clientCert: fs.readFileSync("client.pem"),
+  clientKey: fs.readFileSync("client.key"),
+  apiKey: "my-api-key",
+});
+```
+
 ## API
 
-### `new Client(addr: string)`
+### `new Client(addr: string, options?: ClientOptions)`
 
 Connect to a Fila broker at the given address (e.g., `"localhost:5555"`).
+
+**Options:**
+
+| Option       | Type      | Description                                                        |
+|-------------|-----------|---------------------------------------------------------------------|
+| `tls`       | `boolean` | Enable TLS using the OS system trust store. Implied when `caCert` is set. |
+| `caCert`    | `Buffer`  | CA certificate PEM. Enables TLS with a custom CA when set.         |
+| `clientCert`| `Buffer`  | Client certificate PEM for mTLS. Requires TLS to be enabled.      |
+| `clientKey` | `Buffer`  | Client private key PEM for mTLS. Requires TLS to be enabled.      |
+| `apiKey`    | `string`  | API key sent as `Bearer` token on every RPC call.                  |
 
 ### `client.enqueue(queue, headers, payload): Promise<string>`
 

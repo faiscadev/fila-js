@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, execFileSync } from "child_process";
 import * as fs from "fs";
 import * as net from "net";
 import * as os from "os";
@@ -31,12 +31,27 @@ export interface TestServer {
   addr: string;
   stop: () => void;
   createQueue: (name: string) => Promise<void>;
+  /** Data directory — useful for writing TLS certs. */
+  dataDir: string;
+}
+
+export interface TestServerOptions {
+  /** Extra lines to append to fila.toml. */
+  extraConfig?: string;
+  /** Environment variables to merge. */
+  extraEnv?: Record<string, string>;
+  /** gRPC credentials for admin/readiness connections (default: insecure). */
+  adminCreds?: grpc.ChannelCredentials;
+  /** API key metadata to attach to admin RPCs. */
+  adminApiKey?: string;
 }
 
 export const FILA_SERVER_BIN = findServerBinary();
 export const FILA_SERVER_AVAILABLE = fs.existsSync(FILA_SERVER_BIN);
 
-export async function startTestServer(): Promise<TestServer> {
+export async function startTestServer(
+  opts?: TestServerOptions
+): Promise<TestServer> {
   const port = await findFreePort();
   const addr = `127.0.0.1:${port}`;
 
@@ -44,56 +59,68 @@ export async function startTestServer(): Promise<TestServer> {
 
   // Write config file.
   const configPath = path.join(dataDir, "fila.toml");
-  fs.writeFileSync(configPath, `[server]\nlisten_addr = "${addr}"\n`);
+  let config = `[server]\nlisten_addr = "${addr}"\n`;
+  if (opts?.extraConfig) {
+    config += opts.extraConfig + "\n";
+  }
+  fs.writeFileSync(configPath, config);
 
   const dbDir = path.join(dataDir, "db");
 
   const proc = spawn(FILA_SERVER_BIN, [], {
     cwd: dataDir,
-    env: { ...process.env, FILA_DATA_DIR: dbDir },
-    stdio: "ignore",
+    env: { ...process.env, FILA_DATA_DIR: dbDir, ...opts?.extraEnv },
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
-  // Wait for server ready.
-  const deadline = Date.now() + 10000;
+  let stderrBuf = "";
+  proc.stderr!.on("data", (chunk: Buffer) => {
+    stderrBuf += chunk.toString();
+  });
+
+  const creds = opts?.adminCreds ?? grpc.credentials.createInsecure();
+  const adminMeta = new grpc.Metadata();
+  if (opts?.adminApiKey) {
+    adminMeta.set("authorization", `Bearer ${opts.adminApiKey}`);
+  }
+
+  // Wait for server ready. 20s to accommodate TLS + startup in CI.
+  const deadline = Date.now() + 20000;
   let ready = false;
-  while (Date.now() < deadline) {
+  let exited = false;
+  proc.on("exit", () => { exited = true; });
+
+  // Create a fresh gRPC client per readiness probe. A persistent client can
+  // enter TRANSIENT_FAILURE with aggressive backoff after the first failed TLS
+  // handshake, preventing recovery. Fresh clients guarantee a clean attempt.
+  let lastErr: unknown;
+  while (Date.now() < deadline && !exited) {
+    const probeClient = createAdminClient(addr, creds);
     try {
-      await tryListQueues(addr);
+      await callListQueues(probeClient, adminMeta);
       ready = true;
       break;
-    } catch {
-      await sleep(50);
+    } catch (err) {
+      lastErr = err;
+      await sleep(500);
+    } finally {
+      probeClient.close();
     }
   }
+
   if (!ready) {
     proc.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });
-    throw new Error(`fila-server failed to start within 10s on ${addr}`);
+    const detail = stderrBuf ? `\nServer stderr:\n${stderrBuf.slice(0, 2000)}` : "";
+    const probeDetail = lastErr ? `\nLast probe error: ${lastErr}` : "";
+    throw new Error(`fila-server failed to start within 20s on ${addr}${detail}${probeDetail}`);
   }
 
-  // Load admin proto for queue creation.
-  const adminPackageDef = protoLoader.loadSync(
-    [
-      path.join(PROTO_DIR, "fila", "v1", "admin.proto"),
-      path.join(PROTO_DIR, "fila", "v1", "messages.proto"),
-    ],
-    {
-      keepCase: false,
-      longs: String,
-      enums: String,
-      defaults: true,
-      oneofs: true,
-      includeDirs: [PROTO_DIR],
-    }
-  );
-  const adminProto = grpc.loadPackageDefinition(adminPackageDef);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const AdminService = (adminProto.fila as any).v1.FilaAdmin as grpc.ServiceClientConstructor;
-  const adminClient = new AdminService(addr, grpc.credentials.createInsecure());
+  const adminClient = createAdminClient(addr, creds);
 
   return {
     addr,
+    dataDir,
     stop: () => {
       proc.kill();
       adminClient.close();
@@ -103,6 +130,7 @@ export async function startTestServer(): Promise<TestServer> {
       return new Promise<void>((resolve, reject) => {
         adminClient.createQueue(
           { name, config: {} },
+          adminMeta,
           (err: grpc.ServiceError | null) => {
             if (err) reject(err);
             else resolve();
@@ -113,7 +141,7 @@ export async function startTestServer(): Promise<TestServer> {
   };
 }
 
-function tryListQueues(addr: string): Promise<void> {
+function loadAdminProto(): grpc.ServiceClientConstructor {
   const packageDef = protoLoader.loadSync(
     [
       path.join(PROTO_DIR, "fila", "v1", "admin.proto"),
@@ -130,12 +158,24 @@ function tryListQueues(addr: string): Promise<void> {
   );
   const proto = grpc.loadPackageDefinition(packageDef);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const AdminService = (proto.fila as any).v1.FilaAdmin as grpc.ServiceClientConstructor;
-  const client = new AdminService(addr, grpc.credentials.createInsecure());
+  return (proto.fila as any).v1.FilaAdmin as grpc.ServiceClientConstructor;
+}
 
+function createAdminClient(
+  addr: string,
+  creds: grpc.ChannelCredentials
+): grpc.Client {
+  const AdminService = loadAdminProto();
+  return new AdminService(addr, creds);
+}
+
+function callListQueues(
+  client: grpc.Client,
+  metadata: grpc.Metadata
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    client.listQueues({}, (err: grpc.ServiceError | null) => {
-      client.close();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (client as any).listQueues({}, metadata, (err: grpc.ServiceError | null) => {
       if (err) reject(err);
       else resolve();
     });
@@ -144,4 +184,99 @@ function tryListQueues(addr: string): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Generate a self-signed CA + server + client certificate set for testing mTLS. */
+export function generateTestCerts(outputDir: string): {
+  caCert: Buffer;
+  serverCert: Buffer;
+  serverKey: Buffer;
+  clientCert: Buffer;
+  clientKey: Buffer;
+} {
+
+
+  const caKeyPath = path.join(outputDir, "ca.key");
+  const caCertPath = path.join(outputDir, "ca.pem");
+  const serverKeyPath = path.join(outputDir, "server.key");
+  const serverCsrPath = path.join(outputDir, "server.csr");
+  const serverCertPath = path.join(outputDir, "server.pem");
+  const clientKeyPath = path.join(outputDir, "client.key");
+  const clientCsrPath = path.join(outputDir, "client.csr");
+  const clientCertPath = path.join(outputDir, "client.pem");
+  const serverExtPath = path.join(outputDir, "server-ext.cnf");
+  const clientExtPath = path.join(outputDir, "client-ext.cnf");
+
+  // Write server SAN extension config.
+  fs.writeFileSync(
+    serverExtPath,
+    "subjectAltName=IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth\n"
+  );
+
+  // Write client extension config (rustls requires clientAuth EKU).
+  fs.writeFileSync(
+    clientExtPath,
+    "extendedKeyUsage=clientAuth\n"
+  );
+
+  // CA key + cert.
+  execFileSync(
+    "openssl",
+    [
+      "req", "-x509", "-newkey", "rsa:2048",
+      "-keyout", caKeyPath, "-out", caCertPath,
+      "-days", "1", "-nodes", "-subj", "/CN=fila-test-ca",
+    ],
+    { stdio: "ignore" }
+  );
+
+  // Server key + CSR + cert signed by CA.
+  execFileSync(
+    "openssl",
+    [
+      "req", "-newkey", "rsa:2048",
+      "-keyout", serverKeyPath, "-out", serverCsrPath,
+      "-nodes", "-subj", "/CN=localhost",
+    ],
+    { stdio: "ignore" }
+  );
+  execFileSync(
+    "openssl",
+    [
+      "x509", "-req", "-in", serverCsrPath,
+      "-CA", caCertPath, "-CAkey", caKeyPath,
+      "-CAcreateserial", "-out", serverCertPath,
+      "-days", "1", "-extfile", serverExtPath,
+    ],
+    { stdio: "ignore" }
+  );
+
+  // Client key + CSR + cert signed by CA.
+  execFileSync(
+    "openssl",
+    [
+      "req", "-newkey", "rsa:2048",
+      "-keyout", clientKeyPath, "-out", clientCsrPath,
+      "-nodes", "-subj", "/CN=fila-test-client",
+    ],
+    { stdio: "ignore" }
+  );
+  execFileSync(
+    "openssl",
+    [
+      "x509", "-req", "-in", clientCsrPath,
+      "-CA", caCertPath, "-CAkey", caKeyPath,
+      "-CAcreateserial", "-out", clientCertPath,
+      "-days", "1", "-extfile", clientExtPath,
+    ],
+    { stdio: "ignore" }
+  );
+
+  return {
+    caCert: fs.readFileSync(caCertPath),
+    serverCert: fs.readFileSync(serverCertPath),
+    serverKey: fs.readFileSync(serverKeyPath),
+    clientCert: fs.readFileSync(clientCertPath),
+    clientKey: fs.readFileSync(clientKeyPath),
+  };
 }

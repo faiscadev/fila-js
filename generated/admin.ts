@@ -10,16 +10,24 @@ type SubtypeConstructor<Constructor extends new (...args: any) => any, Subtype> 
 export interface ProtoGrpcType {
   fila: {
     v1: {
+      AclPermission: MessageTypeDefinition
+      ApiKeyInfo: MessageTypeDefinition
       ConfigEntry: MessageTypeDefinition
+      CreateApiKeyRequest: MessageTypeDefinition
+      CreateApiKeyResponse: MessageTypeDefinition
       CreateQueueRequest: MessageTypeDefinition
       CreateQueueResponse: MessageTypeDefinition
       DeleteQueueRequest: MessageTypeDefinition
       DeleteQueueResponse: MessageTypeDefinition
       FilaAdmin: SubtypeConstructor<typeof grpc.Client, _fila_v1_FilaAdminClient> & { service: _fila_v1_FilaAdminDefinition }
+      GetAclRequest: MessageTypeDefinition
+      GetAclResponse: MessageTypeDefinition
       GetConfigRequest: MessageTypeDefinition
       GetConfigResponse: MessageTypeDefinition
       GetStatsRequest: MessageTypeDefinition
       GetStatsResponse: MessageTypeDefinition
+      ListApiKeysRequest: MessageTypeDefinition
+      ListApiKeysResponse: MessageTypeDefinition
       ListConfigRequest: MessageTypeDefinition
       ListConfigResponse: MessageTypeDefinition
       ListQueuesRequest: MessageTypeDefinition
@@ -30,6 +38,10 @@ export interface ProtoGrpcType {
       QueueInfo: MessageTypeDefinition
       RedriveRequest: MessageTypeDefinition
       RedriveResponse: MessageTypeDefinition
+      RevokeApiKeyRequest: MessageTypeDefinition
+      RevokeApiKeyResponse: MessageTypeDefinition
+      SetAclRequest: MessageTypeDefinition
+      SetAclResponse: MessageTypeDefinition
       SetConfigRequest: MessageTypeDefinition
       SetConfigResponse: MessageTypeDefinition
     }
