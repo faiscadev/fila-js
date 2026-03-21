@@ -72,11 +72,17 @@ function mapNackError(err: grpc.ServiceError): FilaError {
 
 /** Connection options for TLS and authentication. */
 export interface ClientOptions {
+  /**
+   * Enable TLS using the OS system trust store for server verification.
+   * When `true` and `caCert` is not provided, the system root certificates
+   * are used automatically. When `caCert` is provided, this is implied.
+   */
+  tls?: boolean;
   /** CA certificate PEM for server verification. When set, enables TLS. */
   caCert?: Buffer;
-  /** Client certificate PEM for mutual TLS (mTLS). Requires caCert and clientKey. */
+  /** Client certificate PEM for mutual TLS (mTLS). Requires TLS to be enabled (via `tls: true` or `caCert`). */
   clientCert?: Buffer;
-  /** Client private key PEM for mutual TLS (mTLS). Requires caCert and clientCert. */
+  /** Client private key PEM for mutual TLS (mTLS). Requires TLS to be enabled (via `tls: true` or `caCert`). */
   clientKey?: Buffer;
   /** API key for authentication. Sent as `authorization: Bearer <key>` metadata on every RPC. */
   apiKey?: string;
@@ -114,9 +120,10 @@ export class Client {
 
     const hasClientCert = !!options?.clientCert;
     const hasClientKey = !!options?.clientKey;
+    const tlsEnabled = !!options?.tls || !!options?.caCert;
 
-    if ((hasClientCert || hasClientKey) && !options?.caCert) {
-      throw new Error("clientCert/clientKey require caCert");
+    if ((hasClientCert || hasClientKey) && !tlsEnabled) {
+      throw new Error("clientCert/clientKey require TLS to be enabled (set tls: true or provide caCert)");
     }
     if (hasClientCert !== hasClientKey) {
       throw new Error("clientCert and clientKey must be provided together");
@@ -128,6 +135,12 @@ export class Client {
         options.caCert,
         options.clientKey ?? null,
         options.clientCert ?? null
+      );
+    } else if (tlsEnabled) {
+      creds = grpc.credentials.createSsl(
+        null,
+        options?.clientKey ?? null,
+        options?.clientCert ?? null
       );
     } else {
       creds = grpc.credentials.createInsecure();
