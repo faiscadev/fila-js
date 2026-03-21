@@ -79,8 +79,8 @@ export async function startTestServer(
     adminMeta.set("authorization", `Bearer ${opts.adminApiKey}`);
   }
 
-  // Wait for server ready.
-  const deadline = Date.now() + 10000;
+  // Wait for server ready. 20s to accommodate TLS cert generation + startup in CI.
+  const deadline = Date.now() + 20000;
   let ready = false;
   while (Date.now() < deadline) {
     try {
@@ -94,7 +94,7 @@ export async function startTestServer(
   if (!ready) {
     proc.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });
-    throw new Error(`fila-server failed to start within 10s on ${addr}`);
+    throw new Error(`fila-server failed to start within 20s on ${addr}`);
   }
 
   // Load admin proto for queue creation.
