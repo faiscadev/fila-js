@@ -84,20 +84,25 @@ export async function startTestServer(
     adminMeta.set("authorization", `Bearer ${opts.adminApiKey}`);
   }
 
-  // Wait for server ready. 20s to accommodate TLS cert generation + startup in CI.
+  // Wait for server ready. 20s to accommodate TLS + startup in CI.
   const deadline = Date.now() + 20000;
   let ready = false;
   let exited = false;
   proc.on("exit", () => { exited = true; });
+
+  // Reuse a single gRPC client for readiness probes to avoid repeated TLS handshakes.
+  const probeClient = createAdminClient(addr, creds);
   while (Date.now() < deadline && !exited) {
     try {
-      await tryListQueues(addr, creds, adminMeta);
+      await callListQueues(probeClient, adminMeta);
       ready = true;
       break;
     } catch {
-      await sleep(50);
+      await sleep(100);
     }
   }
+  probeClient.close();
+
   if (!ready) {
     proc.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -105,25 +110,7 @@ export async function startTestServer(
     throw new Error(`fila-server failed to start within 20s on ${addr}${detail}`);
   }
 
-  // Load admin proto for queue creation.
-  const adminPackageDef = protoLoader.loadSync(
-    [
-      path.join(PROTO_DIR, "fila", "v1", "admin.proto"),
-      path.join(PROTO_DIR, "fila", "v1", "messages.proto"),
-    ],
-    {
-      keepCase: false,
-      longs: String,
-      enums: String,
-      defaults: true,
-      oneofs: true,
-      includeDirs: [PROTO_DIR],
-    }
-  );
-  const adminProto = grpc.loadPackageDefinition(adminPackageDef);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const AdminService = (adminProto.fila as any).v1.FilaAdmin as grpc.ServiceClientConstructor;
-  const adminClient = new AdminService(addr, creds);
+  const adminClient = createAdminClient(addr, creds);
 
   return {
     addr,
@@ -148,11 +135,7 @@ export async function startTestServer(
   };
 }
 
-function tryListQueues(
-  addr: string,
-  creds: grpc.ChannelCredentials,
-  metadata: grpc.Metadata
-): Promise<void> {
+function loadAdminProto(): grpc.ServiceClientConstructor {
   const packageDef = protoLoader.loadSync(
     [
       path.join(PROTO_DIR, "fila", "v1", "admin.proto"),
@@ -169,12 +152,24 @@ function tryListQueues(
   );
   const proto = grpc.loadPackageDefinition(packageDef);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const AdminService = (proto.fila as any).v1.FilaAdmin as grpc.ServiceClientConstructor;
-  const client = new AdminService(addr, creds);
+  return (proto.fila as any).v1.FilaAdmin as grpc.ServiceClientConstructor;
+}
 
+function createAdminClient(
+  addr: string,
+  creds: grpc.ChannelCredentials
+): grpc.Client {
+  const AdminService = loadAdminProto();
+  return new AdminService(addr, creds);
+}
+
+function callListQueues(
+  client: grpc.Client,
+  metadata: grpc.Metadata
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    client.listQueues({}, metadata, (err: grpc.ServiceError | null) => {
-      client.close();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (client as any).listQueues({}, metadata, (err: grpc.ServiceError | null) => {
       if (err) reject(err);
       else resolve();
     });
