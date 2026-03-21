@@ -52,6 +52,9 @@ const client = new Client("localhost:5555", {
 ### Mutual TLS (mTLS)
 
 ```typescript
+import * as fs from "fs";
+import { Client } from "@fila/client";
+
 const client = new Client("localhost:5555", {
   caCert: fs.readFileSync("ca.pem"),
   clientCert: fs.readFileSync("client.pem"),
@@ -62,6 +65,8 @@ const client = new Client("localhost:5555", {
 ### API key authentication
 
 ```typescript
+import { Client } from "@fila/client";
+
 const client = new Client("localhost:5555", {
   apiKey: "my-api-key",
 });
@@ -70,6 +75,9 @@ const client = new Client("localhost:5555", {
 ### mTLS + API key
 
 ```typescript
+import * as fs from "fs";
+import { Client } from "@fila/client";
+
 const client = new Client("localhost:5555", {
   caCert: fs.readFileSync("ca.pem"),
   clientCert: fs.readFileSync("client.pem"),

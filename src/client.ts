@@ -112,6 +112,16 @@ export class Client {
     const FilaService = (proto.fila as any).v1
       .FilaService as grpc.ServiceClientConstructor;
 
+    const hasClientCert = !!options?.clientCert;
+    const hasClientKey = !!options?.clientKey;
+
+    if ((hasClientCert || hasClientKey) && !options?.caCert) {
+      throw new Error("clientCert/clientKey require caCert");
+    }
+    if (hasClientCert !== hasClientKey) {
+      throw new Error("clientCert and clientKey must be provided together");
+    }
+
     let creds: grpc.ChannelCredentials;
     if (options?.caCert) {
       creds = grpc.credentials.createSsl(

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import * as grpc from "@grpc/grpc-js";
 import { Client } from "../src";
@@ -48,7 +49,11 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
       try {
         await expect(
           client.enqueue("auth-test-nokey", null, Buffer.from("fail"))
-        ).rejects.toThrow(RPCError);
+        ).rejects.toSatisfy((err: unknown) => {
+          expect(err).toBeInstanceOf(RPCError);
+          expect((err as RPCError).code).toBe(grpc.status.UNAUTHENTICATED);
+          return true;
+        });
       } finally {
         client.close();
       }
@@ -90,7 +95,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
     let certs: ReturnType<typeof generateTestCerts>;
 
     beforeAll(async () => {
-      const certDir = fs.mkdtempSync("/tmp/fila-tls-test-");
+      const certDir = fs.mkdtempSync(path.join(os.tmpdir(), "fila-tls-test-"));
       certs = generateTestCerts(certDir);
 
       // Write server certs to a temp dir, then reference from config.
@@ -107,7 +112,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         ].join("\n"),
         adminCreds,
       });
-    });
+    }, 30_000);
 
     afterAll(() => {
       server?.stop();
@@ -147,7 +152,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
     let certs: ReturnType<typeof generateTestCerts>;
 
     beforeAll(async () => {
-      const certDir = fs.mkdtempSync("/tmp/fila-mtls-test-");
+      const certDir = fs.mkdtempSync(path.join(os.tmpdir(), "fila-mtls-test-"));
       certs = generateTestCerts(certDir);
 
       const serverCertPath = path.join(certDir, "server.pem");
@@ -172,7 +177,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         adminCreds,
         adminApiKey: BOOTSTRAP_KEY,
       });
-    });
+    }, 30_000);
 
     afterAll(() => {
       server?.stop();

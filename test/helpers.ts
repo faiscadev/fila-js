@@ -1,4 +1,4 @@
-import { spawn, execSync } from "child_process";
+import { spawn, execFileSync } from "child_process";
 import * as fs from "fs";
 import * as net from "net";
 import * as os from "os";
@@ -204,33 +204,55 @@ export function generateTestCerts(outputDir: string): {
   );
 
   // CA key + cert.
-  execSync(
-    `openssl req -x509 -newkey rsa:2048 -keyout ${caKeyPath} -out ${caCertPath} ` +
-      `-days 1 -nodes -subj "/CN=fila-test-ca"`,
+  execFileSync(
+    "openssl",
+    [
+      "req", "-x509", "-newkey", "rsa:2048",
+      "-keyout", caKeyPath, "-out", caCertPath,
+      "-days", "1", "-nodes", "-subj", "/CN=fila-test-ca",
+    ],
     { stdio: "ignore" }
   );
 
   // Server key + CSR + cert signed by CA.
-  execSync(
-    `openssl req -newkey rsa:2048 -keyout ${serverKeyPath} -out ${serverCsrPath} ` +
-      `-nodes -subj "/CN=localhost"`,
+  execFileSync(
+    "openssl",
+    [
+      "req", "-newkey", "rsa:2048",
+      "-keyout", serverKeyPath, "-out", serverCsrPath,
+      "-nodes", "-subj", "/CN=localhost",
+    ],
     { stdio: "ignore" }
   );
-  execSync(
-    `openssl x509 -req -in ${serverCsrPath} -CA ${caCertPath} -CAkey ${caKeyPath} ` +
-      `-CAcreateserial -out ${serverCertPath} -days 1 -extfile ${extPath}`,
+  execFileSync(
+    "openssl",
+    [
+      "x509", "-req", "-in", serverCsrPath,
+      "-CA", caCertPath, "-CAkey", caKeyPath,
+      "-CAcreateserial", "-out", serverCertPath,
+      "-days", "1", "-extfile", extPath,
+    ],
     { stdio: "ignore" }
   );
 
   // Client key + CSR + cert signed by CA.
-  execSync(
-    `openssl req -newkey rsa:2048 -keyout ${clientKeyPath} -out ${clientCsrPath} ` +
-      `-nodes -subj "/CN=fila-test-client"`,
+  execFileSync(
+    "openssl",
+    [
+      "req", "-newkey", "rsa:2048",
+      "-keyout", clientKeyPath, "-out", clientCsrPath,
+      "-nodes", "-subj", "/CN=fila-test-client",
+    ],
     { stdio: "ignore" }
   );
-  execSync(
-    `openssl x509 -req -in ${clientCsrPath} -CA ${caCertPath} -CAkey ${caKeyPath} ` +
-      `-CAcreateserial -out ${clientCertPath} -days 1`,
+  execFileSync(
+    "openssl",
+    [
+      "x509", "-req", "-in", clientCsrPath,
+      "-CA", caCertPath, "-CAkey", caKeyPath,
+      "-CAcreateserial", "-out", clientCertPath,
+      "-days", "1",
+    ],
     { stdio: "ignore" }
   );
 
