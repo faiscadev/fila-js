@@ -70,6 +70,18 @@ function mapNackError(err: grpc.ServiceError): FilaError {
   return new RPCError(err.code, err.details);
 }
 
+/** Connection options for TLS and authentication. */
+export interface ClientOptions {
+  /** CA certificate PEM for server verification. When set, enables TLS. */
+  caCert?: Buffer;
+  /** Client certificate PEM for mutual TLS (mTLS). Requires caCert and clientKey. */
+  clientCert?: Buffer;
+  /** Client private key PEM for mutual TLS (mTLS). Requires caCert and clientCert. */
+  clientKey?: Buffer;
+  /** API key for authentication. Sent as `authorization: Bearer <key>` metadata on every RPC. */
+  apiKey?: string;
+}
+
 /**
  * Client for the Fila message broker.
  *
@@ -87,20 +99,44 @@ function mapNackError(err: grpc.ServiceError): FilaError {
  */
 export class Client {
   private readonly grpcClient: FilaServiceClient;
+  private readonly apiKey?: string;
 
   /**
    * Connect to a Fila broker at the given address.
    * @param addr - Broker address in "host:port" format (e.g., "localhost:5555").
+   * @param options - Optional TLS and authentication settings.
    */
-  constructor(addr: string) {
+  constructor(addr: string, options?: ClientOptions) {
     const proto = loadServiceProto();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const FilaService = (proto.fila as any).v1
       .FilaService as grpc.ServiceClientConstructor;
+
+    let creds: grpc.ChannelCredentials;
+    if (options?.caCert) {
+      creds = grpc.credentials.createSsl(
+        options.caCert,
+        options.clientKey ?? null,
+        options.clientCert ?? null
+      );
+    } else {
+      creds = grpc.credentials.createInsecure();
+    }
+
     this.grpcClient = new FilaService(
       addr,
-      grpc.credentials.createInsecure()
+      creds
     ) as unknown as FilaServiceClient;
+    this.apiKey = options?.apiKey;
+  }
+
+  /** Build gRPC metadata, attaching the API key if configured. */
+  private callMetadata(): grpc.Metadata {
+    const md = new grpc.Metadata();
+    if (this.apiKey) {
+      md.set("authorization", `Bearer ${this.apiKey}`);
+    }
+    return md;
   }
 
   /** Close the underlying gRPC channel. */
@@ -125,6 +161,7 @@ export class Client {
     return new Promise((resolve, reject) => {
       this.grpcClient.enqueue(
         { queue, headers: headers ?? {}, payload },
+        this.callMetadata(),
         (err: grpc.ServiceError | null, resp?: EnqueueResponse__Output) => {
           if (err) {
             reject(mapEnqueueError(err));
@@ -147,7 +184,7 @@ export class Client {
    * @throws {RPCError} For unexpected gRPC failures.
    */
   async *consume(queue: string): AsyncIterable<ConsumeMessage> {
-    const stream = this.grpcClient.consume({ queue });
+    const stream = this.grpcClient.consume({ queue }, this.callMetadata());
 
     // Wrap the Node.js readable stream into an async iterable.
     // grpc-js streams are already async-iterable in modern versions.
@@ -193,6 +230,7 @@ export class Client {
     return new Promise((resolve, reject) => {
       this.grpcClient.ack(
         { queue, messageId: msgId },
+        this.callMetadata(),
         (err: grpc.ServiceError | null) => {
           if (err) {
             reject(mapAckError(err));
@@ -216,6 +254,7 @@ export class Client {
     return new Promise((resolve, reject) => {
       this.grpcClient.nack(
         { queue, messageId: msgId, error },
+        this.callMetadata(),
         (err: grpc.ServiceError | null) => {
           if (err) {
             reject(mapNackError(err));

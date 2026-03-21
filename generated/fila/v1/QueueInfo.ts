@@ -7,6 +7,7 @@ export interface QueueInfo {
   'depth'?: (number | string | Long);
   'inFlight'?: (number | string | Long);
   'activeConsumers'?: (number);
+  'leaderNodeId'?: (number | string | Long);
 }
 
 export interface QueueInfo__Output {
@@ -14,4 +15,5 @@ export interface QueueInfo__Output {
   'depth': (string);
   'inFlight': (string);
   'activeConsumers': (number);
+  'leaderNodeId': (string);
 }

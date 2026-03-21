@@ -38,11 +38,60 @@ for await (const msg of client.consume("my-queue")) {
 client.close();
 ```
 
+### TLS (server verification)
+
+```typescript
+import * as fs from "fs";
+import { Client } from "@fila/client";
+
+const client = new Client("localhost:5555", {
+  caCert: fs.readFileSync("ca.pem"),
+});
+```
+
+### Mutual TLS (mTLS)
+
+```typescript
+const client = new Client("localhost:5555", {
+  caCert: fs.readFileSync("ca.pem"),
+  clientCert: fs.readFileSync("client.pem"),
+  clientKey: fs.readFileSync("client.key"),
+});
+```
+
+### API key authentication
+
+```typescript
+const client = new Client("localhost:5555", {
+  apiKey: "my-api-key",
+});
+```
+
+### mTLS + API key
+
+```typescript
+const client = new Client("localhost:5555", {
+  caCert: fs.readFileSync("ca.pem"),
+  clientCert: fs.readFileSync("client.pem"),
+  clientKey: fs.readFileSync("client.key"),
+  apiKey: "my-api-key",
+});
+```
+
 ## API
 
-### `new Client(addr: string)`
+### `new Client(addr: string, options?: ClientOptions)`
 
 Connect to a Fila broker at the given address (e.g., `"localhost:5555"`).
+
+**Options:**
+
+| Option       | Type     | Description                                          |
+|-------------|----------|------------------------------------------------------|
+| `caCert`    | `Buffer` | CA certificate PEM. Enables TLS when set.            |
+| `clientCert`| `Buffer` | Client certificate PEM for mTLS.                     |
+| `clientKey` | `Buffer` | Client private key PEM for mTLS.                     |
+| `apiKey`    | `string` | API key sent as `Bearer` token on every RPC call.    |
 
 ### `client.enqueue(queue, headers, payload): Promise<string>`
 
