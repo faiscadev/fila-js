@@ -90,24 +90,30 @@ export async function startTestServer(
   let exited = false;
   proc.on("exit", () => { exited = true; });
 
-  // Reuse a single gRPC client for readiness probes to avoid repeated TLS handshakes.
-  const probeClient = createAdminClient(addr, creds);
+  // Create a fresh gRPC client per readiness probe. A persistent client can
+  // enter TRANSIENT_FAILURE with aggressive backoff after the first failed TLS
+  // handshake, preventing recovery. Fresh clients guarantee a clean attempt.
+  let lastErr: unknown;
   while (Date.now() < deadline && !exited) {
+    const probeClient = createAdminClient(addr, creds);
     try {
       await callListQueues(probeClient, adminMeta);
       ready = true;
       break;
-    } catch {
-      await sleep(100);
+    } catch (err) {
+      lastErr = err;
+      await sleep(500);
+    } finally {
+      probeClient.close();
     }
   }
-  probeClient.close();
 
   if (!ready) {
     proc.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });
     const detail = stderrBuf ? `\nServer stderr:\n${stderrBuf.slice(0, 2000)}` : "";
-    throw new Error(`fila-server failed to start within 20s on ${addr}${detail}`);
+    const probeDetail = lastErr ? `\nLast probe error: ${lastErr}` : "";
+    throw new Error(`fila-server failed to start within 20s on ${addr}${detail}${probeDetail}`);
   }
 
   const adminClient = createAdminClient(addr, creds);
