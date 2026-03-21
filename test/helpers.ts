@@ -204,12 +204,19 @@ export function generateTestCerts(outputDir: string): {
   const clientKeyPath = path.join(outputDir, "client.key");
   const clientCsrPath = path.join(outputDir, "client.csr");
   const clientCertPath = path.join(outputDir, "client.pem");
-  const extPath = path.join(outputDir, "ext.cnf");
+  const serverExtPath = path.join(outputDir, "server-ext.cnf");
+  const clientExtPath = path.join(outputDir, "client-ext.cnf");
 
-  // Write SAN extension config.
+  // Write server SAN extension config.
   fs.writeFileSync(
-    extPath,
-    "subjectAltName=IP:127.0.0.1,DNS:localhost\n"
+    serverExtPath,
+    "subjectAltName=IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth\n"
+  );
+
+  // Write client extension config (rustls requires clientAuth EKU).
+  fs.writeFileSync(
+    clientExtPath,
+    "extendedKeyUsage=clientAuth\n"
   );
 
   // CA key + cert.
@@ -239,7 +246,7 @@ export function generateTestCerts(outputDir: string): {
       "x509", "-req", "-in", serverCsrPath,
       "-CA", caCertPath, "-CAkey", caKeyPath,
       "-CAcreateserial", "-out", serverCertPath,
-      "-days", "1", "-extfile", extPath,
+      "-days", "1", "-extfile", serverExtPath,
     ],
     { stdio: "ignore" }
   );
@@ -260,7 +267,7 @@ export function generateTestCerts(outputDir: string): {
       "x509", "-req", "-in", clientCsrPath,
       "-CA", caCertPath, "-CAkey", caKeyPath,
       "-CAcreateserial", "-out", clientCertPath,
-      "-days", "1",
+      "-days", "1", "-extfile", clientExtPath,
     ],
     { stdio: "ignore" }
   );
