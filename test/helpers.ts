@@ -70,7 +70,12 @@ export async function startTestServer(
   const proc = spawn(FILA_SERVER_BIN, [], {
     cwd: dataDir,
     env: { ...process.env, FILA_DATA_DIR: dbDir, ...opts?.extraEnv },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  let stderrBuf = "";
+  proc.stderr!.on("data", (chunk: Buffer) => {
+    stderrBuf += chunk.toString();
   });
 
   const creds = opts?.adminCreds ?? grpc.credentials.createInsecure();
@@ -82,7 +87,9 @@ export async function startTestServer(
   // Wait for server ready. 20s to accommodate TLS cert generation + startup in CI.
   const deadline = Date.now() + 20000;
   let ready = false;
-  while (Date.now() < deadline) {
+  let exited = false;
+  proc.on("exit", () => { exited = true; });
+  while (Date.now() < deadline && !exited) {
     try {
       await tryListQueues(addr, creds, adminMeta);
       ready = true;
@@ -94,7 +101,8 @@ export async function startTestServer(
   if (!ready) {
     proc.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });
-    throw new Error(`fila-server failed to start within 20s on ${addr}`);
+    const detail = stderrBuf ? `\nServer stderr:\n${stderrBuf.slice(0, 2000)}` : "";
+    throw new Error(`fila-server failed to start within 20s on ${addr}${detail}`);
   }
 
   // Load admin proto for queue creation.
