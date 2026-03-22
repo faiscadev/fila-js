@@ -42,6 +42,34 @@ function loadServiceProto(): grpc.GrpcObject {
   return grpc.loadPackageDefinition(packageDefinition);
 }
 
+/** Metadata key the server uses to indicate the current queue leader address. */
+const LEADER_ADDR_KEY = "x-fila-leader-addr";
+
+/**
+ * Extract the leader address from a gRPC UNAVAILABLE error's trailing metadata.
+ * Returns the address string, or undefined if not present.
+ */
+function extractLeaderAddr(err: grpc.ServiceError): string | undefined {
+  if (err.code !== grpc.status.UNAVAILABLE) return undefined;
+  const values = err.metadata?.get(LEADER_ADDR_KEY);
+  if (values && values.length > 0) {
+    return String(values[0]);
+  }
+  return undefined;
+}
+
+/** Create a FilaServiceClient for the given address and credentials. */
+function createGrpcClient(
+  addr: string,
+  creds: grpc.ChannelCredentials
+): FilaServiceClient {
+  const proto = loadServiceProto();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const FilaService = (proto.fila as any).v1
+    .FilaService as grpc.ServiceClientConstructor;
+  return new FilaService(addr, creds) as unknown as FilaServiceClient;
+}
+
 function mapEnqueueError(err: grpc.ServiceError): FilaError {
   if (err.code === grpc.status.NOT_FOUND) {
     return new QueueNotFoundError(`enqueue: ${err.details}`);
@@ -105,6 +133,7 @@ export interface ClientOptions {
  */
 export class Client {
   private readonly grpcClient: FilaServiceClient;
+  private readonly creds: grpc.ChannelCredentials;
   private readonly apiKey?: string;
 
   /**
@@ -113,11 +142,6 @@ export class Client {
    * @param options - Optional TLS and authentication settings.
    */
   constructor(addr: string, options?: ClientOptions) {
-    const proto = loadServiceProto();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const FilaService = (proto.fila as any).v1
-      .FilaService as grpc.ServiceClientConstructor;
-
     const hasClientCert = !!options?.clientCert;
     const hasClientKey = !!options?.clientKey;
     const tlsEnabled = !!options?.tls || !!options?.caCert;
@@ -129,27 +153,23 @@ export class Client {
       throw new Error("clientCert and clientKey must be provided together");
     }
 
-    let creds: grpc.ChannelCredentials;
     if (options?.caCert) {
-      creds = grpc.credentials.createSsl(
+      this.creds = grpc.credentials.createSsl(
         options.caCert,
         options.clientKey ?? null,
         options.clientCert ?? null
       );
     } else if (tlsEnabled) {
-      creds = grpc.credentials.createSsl(
+      this.creds = grpc.credentials.createSsl(
         null,
         options?.clientKey ?? null,
         options?.clientCert ?? null
       );
     } else {
-      creds = grpc.credentials.createInsecure();
+      this.creds = grpc.credentials.createInsecure();
     }
 
-    this.grpcClient = new FilaService(
-      addr,
-      creds
-    ) as unknown as FilaServiceClient;
+    this.grpcClient = createGrpcClient(addr, this.creds);
     this.apiKey = options?.apiKey;
   }
 
@@ -202,15 +222,27 @@ export class Client {
    * Returns an async iterable that yields messages as they become available.
    * Nil message frames (keepalive signals) are skipped automatically.
    *
+   * If the server returns UNAVAILABLE with an `x-fila-leader-addr` metadata
+   * header, the client transparently reconnects to the leader node and retries
+   * the consume stream once (max 1 redirect per call).
+   *
    * @param queue - Queue to consume from.
    * @throws {QueueNotFoundError} If the queue does not exist.
    * @throws {RPCError} For unexpected gRPC failures.
    */
   async *consume(queue: string): AsyncIterable<ConsumeMessage> {
-    const stream = this.grpcClient.consume({ queue }, this.callMetadata());
+    yield* this.consumeInner(queue, false);
+  }
 
-    // Wrap the Node.js readable stream into an async iterable.
-    // grpc-js streams are already async-iterable in modern versions.
+  /**
+   * Inner consume implementation that optionally follows a leader hint.
+   * @param redirected - true if this is already a redirected attempt (prevents loops).
+   */
+  private async *consumeInner(
+    queue: string,
+    redirected: boolean
+  ): AsyncIterable<ConsumeMessage> {
+    const stream = this.grpcClient.consume({ queue }, this.callMetadata());
     const iterable = stream as AsyncIterable<ConsumeResponse__Output>;
 
     try {
@@ -233,6 +265,54 @@ export class Client {
       }
     } catch (err) {
       const svcErr = err as grpc.ServiceError;
+
+      // If we haven't redirected yet and the server tells us who the leader is,
+      // open a new connection to the leader and retry the consume stream.
+      if (!redirected) {
+        const leaderAddr = extractLeaderAddr(svcErr);
+        if (leaderAddr) {
+          stream.cancel();
+          const leaderClient = createGrpcClient(leaderAddr, this.creds);
+          const leaderStream = leaderClient.consume(
+            { queue },
+            this.callMetadata()
+          );
+          const leaderIterable =
+            leaderStream as AsyncIterable<ConsumeResponse__Output>;
+          try {
+            for await (const resp of leaderIterable) {
+              const msg = resp.message;
+              if (!msg || !msg.id) {
+                continue;
+              }
+              const metadata = msg.metadata;
+              yield {
+                id: msg.id,
+                headers: msg.headers ?? {},
+                payload: Buffer.isBuffer(msg.payload)
+                  ? msg.payload
+                  : Buffer.from(msg.payload ?? ""),
+                fairnessKey: metadata?.fairnessKey ?? "",
+                attemptCount: metadata?.attemptCount ?? 0,
+                queue: metadata?.queueId ?? "",
+              };
+            }
+          } catch (retryErr) {
+            const retrySvcErr = retryErr as grpc.ServiceError;
+            if (
+              retrySvcErr.code !== undefined &&
+              retrySvcErr.code !== grpc.status.CANCELLED
+            ) {
+              throw mapConsumeError(retrySvcErr);
+            }
+          } finally {
+            leaderStream.cancel();
+            (leaderClient as unknown as grpc.Client).close();
+          }
+          return;
+        }
+      }
+
       if (svcErr.code !== undefined && svcErr.code !== grpc.status.CANCELLED) {
         throw mapConsumeError(svcErr);
       }
