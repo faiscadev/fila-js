@@ -5,13 +5,13 @@ JavaScript/TypeScript client SDK for the [Fila](https://github.com/faisca/fila) 
 ## Installation
 
 ```bash
-npm install @fila/client
+npm install fila-client
 ```
 
 ## Usage
 
 ```typescript
-import { Client } from "@fila/client";
+import { Client } from "fila-client";
 
 const client = new Client("localhost:5555");
 
@@ -54,7 +54,7 @@ For self-signed or private CA certificates, pass the CA cert explicitly:
 
 ```typescript
 import * as fs from "fs";
-import { Client } from "@fila/client";
+import { Client } from "fila-client";
 
 const client = new Client("localhost:5555", {
   caCert: fs.readFileSync("ca.pem"),
@@ -149,7 +149,7 @@ Close the underlying gRPC channel.
 Per-operation error classes are thrown for specific failure modes:
 
 ```typescript
-import { QueueNotFoundError, MessageNotFoundError } from "@fila/client";
+import { QueueNotFoundError, MessageNotFoundError } from "fila-client";
 
 try {
   await client.enqueue("missing-queue", null, Buffer.from("test"));
