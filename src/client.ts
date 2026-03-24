@@ -173,6 +173,27 @@ export class Client {
     this.apiKey = options?.apiKey;
   }
 
+  /** Map a ConsumeResponse to a ConsumeMessage, or undefined for keepalive frames. */
+  private static mapConsumeResponse(
+    resp: ConsumeResponse__Output
+  ): ConsumeMessage | undefined {
+    const msg = resp.message;
+    if (!msg || !msg.id) {
+      return undefined; // keepalive frame
+    }
+    const metadata = msg.metadata;
+    return {
+      id: msg.id,
+      headers: msg.headers ?? {},
+      payload: Buffer.isBuffer(msg.payload)
+        ? msg.payload
+        : Buffer.from(msg.payload ?? ""),
+      fairnessKey: metadata?.fairnessKey ?? "",
+      attemptCount: metadata?.attemptCount ?? 0,
+      queue: metadata?.queueId ?? "",
+    };
+  }
+
   /** Build gRPC metadata, attaching the API key if configured. */
   private callMetadata(): grpc.Metadata {
     const md = new grpc.Metadata();
@@ -247,21 +268,8 @@ export class Client {
 
     try {
       for await (const resp of iterable) {
-        const msg = resp.message;
-        if (!msg || !msg.id) {
-          continue; // keepalive frame
-        }
-        const metadata = msg.metadata;
-        yield {
-          id: msg.id,
-          headers: msg.headers ?? {},
-          payload: Buffer.isBuffer(msg.payload)
-            ? msg.payload
-            : Buffer.from(msg.payload ?? ""),
-          fairnessKey: metadata?.fairnessKey ?? "",
-          attemptCount: metadata?.attemptCount ?? 0,
-          queue: metadata?.queueId ?? "",
-        };
+        const mapped = Client.mapConsumeResponse(resp);
+        if (mapped) yield mapped;
       }
     } catch (err) {
       const svcErr = err as grpc.ServiceError;
@@ -281,21 +289,8 @@ export class Client {
             leaderStream as AsyncIterable<ConsumeResponse__Output>;
           try {
             for await (const resp of leaderIterable) {
-              const msg = resp.message;
-              if (!msg || !msg.id) {
-                continue;
-              }
-              const metadata = msg.metadata;
-              yield {
-                id: msg.id,
-                headers: msg.headers ?? {},
-                payload: Buffer.isBuffer(msg.payload)
-                  ? msg.payload
-                  : Buffer.from(msg.payload ?? ""),
-                fairnessKey: metadata?.fairnessKey ?? "",
-                attemptCount: metadata?.attemptCount ?? 0,
-                queue: metadata?.queueId ?? "",
-              };
+              const mapped = Client.mapConsumeResponse(resp);
+              if (mapped) yield mapped;
             }
           } catch (retryErr) {
             const retrySvcErr = retryErr as grpc.ServiceError;
