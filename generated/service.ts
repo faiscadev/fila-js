@@ -12,6 +12,9 @@ export interface ProtoGrpcType {
     v1: {
       AckRequest: MessageTypeDefinition
       AckResponse: MessageTypeDefinition
+      BatchEnqueueRequest: MessageTypeDefinition
+      BatchEnqueueResponse: MessageTypeDefinition
+      BatchEnqueueResult: MessageTypeDefinition
       ConsumeRequest: MessageTypeDefinition
       ConsumeResponse: MessageTypeDefinition
       EnqueueRequest: MessageTypeDefinition

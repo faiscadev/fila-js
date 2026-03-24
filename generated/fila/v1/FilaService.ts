@@ -4,6 +4,8 @@ import type * as grpc from '@grpc/grpc-js'
 import type { MethodDefinition } from '@grpc/proto-loader'
 import type { AckRequest as _fila_v1_AckRequest, AckRequest__Output as _fila_v1_AckRequest__Output } from '../../fila/v1/AckRequest';
 import type { AckResponse as _fila_v1_AckResponse, AckResponse__Output as _fila_v1_AckResponse__Output } from '../../fila/v1/AckResponse';
+import type { BatchEnqueueRequest as _fila_v1_BatchEnqueueRequest, BatchEnqueueRequest__Output as _fila_v1_BatchEnqueueRequest__Output } from '../../fila/v1/BatchEnqueueRequest';
+import type { BatchEnqueueResponse as _fila_v1_BatchEnqueueResponse, BatchEnqueueResponse__Output as _fila_v1_BatchEnqueueResponse__Output } from '../../fila/v1/BatchEnqueueResponse';
 import type { ConsumeRequest as _fila_v1_ConsumeRequest, ConsumeRequest__Output as _fila_v1_ConsumeRequest__Output } from '../../fila/v1/ConsumeRequest';
 import type { ConsumeResponse as _fila_v1_ConsumeResponse, ConsumeResponse__Output as _fila_v1_ConsumeResponse__Output } from '../../fila/v1/ConsumeResponse';
 import type { EnqueueRequest as _fila_v1_EnqueueRequest, EnqueueRequest__Output as _fila_v1_EnqueueRequest__Output } from '../../fila/v1/EnqueueRequest';
@@ -20,6 +22,15 @@ export interface FilaServiceClient extends grpc.Client {
   ack(argument: _fila_v1_AckRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_fila_v1_AckResponse__Output>): grpc.ClientUnaryCall;
   ack(argument: _fila_v1_AckRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_fila_v1_AckResponse__Output>): grpc.ClientUnaryCall;
   ack(argument: _fila_v1_AckRequest, callback: grpc.requestCallback<_fila_v1_AckResponse__Output>): grpc.ClientUnaryCall;
+  
+  BatchEnqueue(argument: _fila_v1_BatchEnqueueRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_fila_v1_BatchEnqueueResponse__Output>): grpc.ClientUnaryCall;
+  BatchEnqueue(argument: _fila_v1_BatchEnqueueRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_fila_v1_BatchEnqueueResponse__Output>): grpc.ClientUnaryCall;
+  BatchEnqueue(argument: _fila_v1_BatchEnqueueRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_fila_v1_BatchEnqueueResponse__Output>): grpc.ClientUnaryCall;
+  BatchEnqueue(argument: _fila_v1_BatchEnqueueRequest, callback: grpc.requestCallback<_fila_v1_BatchEnqueueResponse__Output>): grpc.ClientUnaryCall;
+  batchEnqueue(argument: _fila_v1_BatchEnqueueRequest, metadata: grpc.Metadata, options: grpc.CallOptions, callback: grpc.requestCallback<_fila_v1_BatchEnqueueResponse__Output>): grpc.ClientUnaryCall;
+  batchEnqueue(argument: _fila_v1_BatchEnqueueRequest, metadata: grpc.Metadata, callback: grpc.requestCallback<_fila_v1_BatchEnqueueResponse__Output>): grpc.ClientUnaryCall;
+  batchEnqueue(argument: _fila_v1_BatchEnqueueRequest, options: grpc.CallOptions, callback: grpc.requestCallback<_fila_v1_BatchEnqueueResponse__Output>): grpc.ClientUnaryCall;
+  batchEnqueue(argument: _fila_v1_BatchEnqueueRequest, callback: grpc.requestCallback<_fila_v1_BatchEnqueueResponse__Output>): grpc.ClientUnaryCall;
   
   Consume(argument: _fila_v1_ConsumeRequest, metadata: grpc.Metadata, options?: grpc.CallOptions): grpc.ClientReadableStream<_fila_v1_ConsumeResponse__Output>;
   Consume(argument: _fila_v1_ConsumeRequest, options?: grpc.CallOptions): grpc.ClientReadableStream<_fila_v1_ConsumeResponse__Output>;
@@ -49,6 +60,8 @@ export interface FilaServiceClient extends grpc.Client {
 export interface FilaServiceHandlers extends grpc.UntypedServiceImplementation {
   Ack: grpc.handleUnaryCall<_fila_v1_AckRequest__Output, _fila_v1_AckResponse>;
   
+  BatchEnqueue: grpc.handleUnaryCall<_fila_v1_BatchEnqueueRequest__Output, _fila_v1_BatchEnqueueResponse>;
+  
   Consume: grpc.handleServerStreamingCall<_fila_v1_ConsumeRequest__Output, _fila_v1_ConsumeResponse>;
   
   Enqueue: grpc.handleUnaryCall<_fila_v1_EnqueueRequest__Output, _fila_v1_EnqueueResponse>;
@@ -59,6 +72,7 @@ export interface FilaServiceHandlers extends grpc.UntypedServiceImplementation {
 
 export interface FilaServiceDefinition extends grpc.ServiceDefinition {
   Ack: MethodDefinition<_fila_v1_AckRequest, _fila_v1_AckResponse, _fila_v1_AckRequest__Output, _fila_v1_AckResponse__Output>
+  BatchEnqueue: MethodDefinition<_fila_v1_BatchEnqueueRequest, _fila_v1_BatchEnqueueResponse, _fila_v1_BatchEnqueueRequest__Output, _fila_v1_BatchEnqueueResponse__Output>
   Consume: MethodDefinition<_fila_v1_ConsumeRequest, _fila_v1_ConsumeResponse, _fila_v1_ConsumeRequest__Output, _fila_v1_ConsumeResponse__Output>
   Enqueue: MethodDefinition<_fila_v1_EnqueueRequest, _fila_v1_EnqueueResponse, _fila_v1_EnqueueRequest__Output, _fila_v1_EnqueueResponse__Output>
   Nack: MethodDefinition<_fila_v1_NackRequest, _fila_v1_NackResponse, _fila_v1_NackRequest__Output, _fila_v1_NackResponse__Output>

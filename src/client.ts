@@ -9,10 +9,11 @@ import {
   QueueNotFoundError,
   RPCError,
 } from "./errors";
-import type { ConsumeMessage } from "./types";
+import type { ConsumeMessage, EnqueueMessage, BatchEnqueueResult } from "./types";
 import type { FilaServiceClient } from "../generated/fila/v1/FilaService";
 import type { EnqueueResponse__Output } from "../generated/fila/v1/EnqueueResponse";
 import type { ConsumeResponse__Output } from "../generated/fila/v1/ConsumeResponse";
+import { Batcher, type BatchMode } from "./batcher";
 
 function resolveProtoDir(): string {
   // Source (dev/test): __dirname = <root>/src/
@@ -98,7 +99,51 @@ function mapNackError(err: grpc.ServiceError): FilaError {
   return new RPCError(err.code, err.details);
 }
 
-/** Connection options for TLS and authentication. */
+/** Map a ConsumeResponse to ConsumeMessage(s), skipping keepalive frames. */
+function mapConsumeResponse(
+  resp: ConsumeResponse__Output
+): ConsumeMessage[] {
+  // Prefer the batched `messages` field when non-empty.
+  if (resp.messages && resp.messages.length > 0) {
+    const results: ConsumeMessage[] = [];
+    for (const msg of resp.messages) {
+      if (!msg || !msg.id) continue;
+      const metadata = msg.metadata;
+      results.push({
+        id: msg.id,
+        headers: msg.headers ?? {},
+        payload: Buffer.isBuffer(msg.payload)
+          ? msg.payload
+          : Buffer.from(msg.payload ?? ""),
+        fairnessKey: metadata?.fairnessKey ?? "",
+        attemptCount: metadata?.attemptCount ?? 0,
+        queue: metadata?.queueId ?? "",
+      });
+    }
+    return results;
+  }
+
+  // Fall back to singular `message` field (backward compatible).
+  const msg = resp.message;
+  if (!msg || !msg.id) {
+    return []; // keepalive frame
+  }
+  const metadata = msg.metadata;
+  return [
+    {
+      id: msg.id,
+      headers: msg.headers ?? {},
+      payload: Buffer.isBuffer(msg.payload)
+        ? msg.payload
+        : Buffer.from(msg.payload ?? ""),
+      fairnessKey: metadata?.fairnessKey ?? "",
+      attemptCount: metadata?.attemptCount ?? 0,
+      queue: metadata?.queueId ?? "",
+    },
+  ];
+}
+
+/** Connection options for TLS, authentication, and batching. */
 export interface ClientOptions {
   /**
    * Enable TLS using the OS system trust store for server verification.
@@ -114,12 +159,31 @@ export interface ClientOptions {
   clientKey?: Buffer;
   /** API key for authentication. Sent as `authorization: Bearer <key>` metadata on every RPC. */
   apiKey?: string;
+  /**
+   * Batch mode for enqueue() calls.
+   *
+   * - `'auto'` (DEFAULT): Opportunistic batching via setImmediate. Zero config,
+   *   zero latency penalty at low load. Messages cluster naturally at high load.
+   * - `'linger'`: Timer-based batching with explicit `lingerMs` and `batchSize`.
+   * - `'disabled'`: No batching. Each enqueue() is a direct RPC.
+   *
+   * @default 'auto'
+   */
+  batchMode?: "auto" | "linger" | "disabled";
+  /** Maximum batch size for auto mode. Default: 100. */
+  maxBatchSize?: number;
+  /** Linger time in milliseconds for linger mode. Required when batchMode is 'linger'. */
+  lingerMs?: number;
+  /** Maximum messages per batch for linger mode. Required when batchMode is 'linger'. */
+  batchSize?: number;
 }
 
 /**
  * Client for the Fila message broker.
  *
  * Wraps the hot-path gRPC operations: enqueue, consume, ack, nack.
+ * By default, enqueue() calls are automatically batched for optimal throughput
+ * with zero added latency at low load.
  *
  * @example
  * ```typescript
@@ -128,18 +192,19 @@ export interface ClientOptions {
  * for await (const msg of client.consume("my-queue")) {
  *   await client.ack("my-queue", msg.id);
  * }
- * client.close();
+ * await client.close();
  * ```
  */
 export class Client {
   private readonly grpcClient: FilaServiceClient;
   private readonly creds: grpc.ChannelCredentials;
   private readonly apiKey?: string;
+  private readonly batcher: Batcher | null;
 
   /**
    * Connect to a Fila broker at the given address.
    * @param addr - Broker address in "host:port" format (e.g., "localhost:5555").
-   * @param options - Optional TLS and authentication settings.
+   * @param options - Optional TLS, authentication, and batching settings.
    */
   constructor(addr: string, options?: ClientOptions) {
     const hasClientCert = !!options?.clientCert;
@@ -171,27 +236,34 @@ export class Client {
 
     this.grpcClient = createGrpcClient(addr, this.creds);
     this.apiKey = options?.apiKey;
-  }
 
-  /** Map a ConsumeResponse to a ConsumeMessage, or undefined for keepalive frames. */
-  private static mapConsumeResponse(
-    resp: ConsumeResponse__Output
-  ): ConsumeMessage | undefined {
-    const msg = resp.message;
-    if (!msg || !msg.id) {
-      return undefined; // keepalive frame
+    // Initialize the batcher based on the configured mode.
+    const modeStr = options?.batchMode ?? "auto";
+    if (modeStr === "disabled") {
+      this.batcher = null;
+    } else {
+      let batchMode: BatchMode;
+      if (modeStr === "linger") {
+        if (options?.lingerMs === undefined || options?.batchSize === undefined) {
+          throw new Error("lingerMs and batchSize are required when batchMode is 'linger'");
+        }
+        batchMode = {
+          mode: "linger",
+          lingerMs: options.lingerMs,
+          batchSize: options.batchSize,
+        };
+      } else {
+        batchMode = {
+          mode: "auto",
+          maxBatchSize: options?.maxBatchSize,
+        };
+      }
+      this.batcher = new Batcher(
+        this.grpcClient,
+        () => this.callMetadata(),
+        batchMode
+      );
     }
-    const metadata = msg.metadata;
-    return {
-      id: msg.id,
-      headers: msg.headers ?? {},
-      payload: Buffer.isBuffer(msg.payload)
-        ? msg.payload
-        : Buffer.from(msg.payload ?? ""),
-      fairnessKey: metadata?.fairnessKey ?? "",
-      attemptCount: metadata?.attemptCount ?? 0,
-      queue: metadata?.queueId ?? "",
-    };
   }
 
   /** Build gRPC metadata, attaching the API key if configured. */
@@ -203,13 +275,25 @@ export class Client {
     return md;
   }
 
-  /** Close the underlying gRPC channel. */
-  close(): void {
+  /**
+   * Close the client, draining any pending batched messages first.
+   * Returns a promise that resolves when all pending messages have been
+   * flushed and the gRPC channel is closed.
+   */
+  async close(): Promise<void> {
+    if (this.batcher) {
+      await this.batcher.drain();
+    }
     (this.grpcClient as unknown as grpc.Client).close();
   }
 
   /**
    * Enqueue a message to the specified queue.
+   *
+   * When batching is enabled (default), the message is routed through the
+   * batcher. At low load, messages are sent individually. At high load,
+   * messages cluster naturally into BatchEnqueue RPCs.
+   *
    * @param queue - Target queue name.
    * @param headers - Optional message headers.
    * @param payload - Message payload bytes.
@@ -222,6 +306,16 @@ export class Client {
     headers: Record<string, string> | null,
     payload: Buffer
   ): Promise<string> {
+    // Route through the batcher when enabled.
+    if (this.batcher) {
+      return this.batcher.submit({
+        queue,
+        headers: headers ?? {},
+        payload,
+      });
+    }
+
+    // No batching: direct RPC.
     return new Promise((resolve, reject) => {
       this.grpcClient.enqueue(
         { queue, headers: headers ?? {}, payload },
@@ -238,10 +332,74 @@ export class Client {
   }
 
   /**
+   * Enqueue a batch of messages in a single RPC call.
+   *
+   * Each message is independently validated and processed. A failed message
+   * does not affect the others in the batch. Returns one result per input
+   * message, in the same order.
+   *
+   * This is more efficient than calling enqueue() in a loop because it
+   * amortizes the RPC overhead across all messages.
+   *
+   * @param messages - Array of messages to enqueue.
+   * @returns Per-message results (success with messageId, or error with description).
+   * @throws {RPCError} For transport-level failures affecting the entire batch.
+   */
+  batchEnqueue(messages: EnqueueMessage[]): Promise<BatchEnqueueResult[]> {
+    // batchEnqueue always bypasses the batcher and uses a direct RPC.
+    // Create a temporary batcher-like object to reuse the RPC logic,
+    // or just call the gRPC client directly.
+    return this.doBatchEnqueue(messages);
+  }
+
+  private doBatchEnqueue(messages: EnqueueMessage[]): Promise<BatchEnqueueResult[]> {
+    const protoMessages = messages.map((m) => ({
+      queue: m.queue,
+      headers: m.headers,
+      payload: m.payload,
+    }));
+
+    return new Promise<BatchEnqueueResult[]>((resolve, reject) => {
+      this.grpcClient.batchEnqueue(
+        { messages: protoMessages },
+        this.callMetadata(),
+        (err: grpc.ServiceError | null, resp?) => {
+          if (err) {
+            reject(new RPCError(err.code, err.details));
+            return;
+          }
+
+          const results: BatchEnqueueResult[] = resp!.results.map(
+            (r: { result?: string; success?: { messageId?: string } | null; error?: string }) => {
+              if (r.result === "success" && r.success) {
+                return {
+                  success: true as const,
+                  messageId: r.success.messageId!,
+                };
+              } else if (r.result === "error" && r.error) {
+                return { success: false as const, error: r.error };
+              } else {
+                return {
+                  success: false as const,
+                  error: "no result from server",
+                };
+              }
+            }
+          );
+
+          resolve(results);
+        }
+      );
+    });
+  }
+
+  /**
    * Open a streaming consumer on the specified queue.
    *
    * Returns an async iterable that yields messages as they become available.
    * Nil message frames (keepalive signals) are skipped automatically.
+   * Batched delivery frames (multiple messages per ConsumeResponse) are
+   * transparently unpacked into individual messages.
    *
    * If the server returns UNAVAILABLE with an `x-fila-leader-addr` metadata
    * header, the client transparently reconnects to the leader node and retries
@@ -268,8 +426,10 @@ export class Client {
 
     try {
       for await (const resp of iterable) {
-        const mapped = Client.mapConsumeResponse(resp);
-        if (mapped) yield mapped;
+        const messages = mapConsumeResponse(resp);
+        for (const msg of messages) {
+          yield msg;
+        }
       }
     } catch (err) {
       const svcErr = err as grpc.ServiceError;
@@ -289,8 +449,10 @@ export class Client {
             leaderStream as AsyncIterable<ConsumeResponse__Output>;
           try {
             for await (const resp of leaderIterable) {
-              const mapped = Client.mapConsumeResponse(resp);
-              if (mapped) yield mapped;
+              const messages = mapConsumeResponse(resp);
+              for (const msg of messages) {
+                yield msg;
+              }
             }
           } catch (retryErr) {
             const retrySvcErr = retryErr as grpc.ServiceError;

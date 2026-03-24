@@ -39,7 +39,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         );
         expect(msgId).toBeTruthy();
       } finally {
-        client.close();
+        await client.close();
       }
     });
 
@@ -55,7 +55,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
           return true;
         });
       } finally {
-        client.close();
+        await client.close();
       }
     });
 
@@ -67,7 +67,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
           client.enqueue("auth-test-badkey", null, Buffer.from("fail"))
         ).rejects.toThrow(RPCError);
       } finally {
-        client.close();
+        await client.close();
       }
     });
 
@@ -86,7 +86,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         }
         expect(received).toBe(true);
       } finally {
-        client.close();
+        await client.close();
       }
     });
   });
@@ -131,7 +131,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         );
         expect(msgId).toBeTruthy();
       } finally {
-        client.close();
+        await client.close();
       }
     });
 
@@ -143,7 +143,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
           client.enqueue("tls-test-insecure", null, Buffer.from("fail"))
         ).rejects.toThrow();
       } finally {
-        client.close();
+        await client.close();
       }
     });
   });
@@ -199,7 +199,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         );
         expect(msgId).toBeTruthy();
       } finally {
-        client.close();
+        await client.close();
       }
     });
 
@@ -230,7 +230,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         }
         expect(received).toBe(true);
       } finally {
-        client.close();
+        await client.close();
       }
     });
   });

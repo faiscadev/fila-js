@@ -13,3 +13,18 @@ export interface ConsumeMessage {
   /** Queue the message belongs to. */
   queue: string;
 }
+
+/** A single message specification for enqueue operations. */
+export interface EnqueueMessage {
+  /** Target queue name. */
+  queue: string;
+  /** Message headers (key-value pairs). */
+  headers: Record<string, string>;
+  /** Message payload bytes. */
+  payload: Buffer;
+}
+
+/** The result of a single message within a batch enqueue call. */
+export type BatchEnqueueResult =
+  | { success: true; messageId: string }
+  | { success: false; error: string };
