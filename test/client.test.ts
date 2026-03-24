@@ -45,7 +45,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Client", () => {
       }
       expect(received).toBe(true);
     } finally {
-      client.close();
+      await client.close();
     }
   });
 
@@ -77,7 +77,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Client", () => {
       }
       expect(deliveryCount).toBe(1);
     } finally {
-      client.close();
+      await client.close();
     }
   });
 
@@ -88,7 +88,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Client", () => {
         client.enqueue("no-such-queue", null, Buffer.from("fail"))
       ).rejects.toThrow(QueueNotFoundError);
     } finally {
-      client.close();
+      await client.close();
     }
   });
 });
