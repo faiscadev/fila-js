@@ -4,7 +4,6 @@ import { QueueNotFoundError, RPCError } from "./errors";
 import type { EnqueueMessage } from "./types";
 import type { FilaServiceClient } from "../generated/fila/v1/FilaService";
 import type { EnqueueResponse__Output } from "../generated/fila/v1/EnqueueResponse";
-import type { BatchEnqueueResponse__Output } from "../generated/fila/v1/BatchEnqueueResponse";
 
 /** Controls how the SDK batches enqueue() calls. */
 export type BatchMode =
@@ -19,7 +18,18 @@ interface BatchItem {
   reject: (err: Error) => void;
 }
 
-function mapEnqueueError(err: grpc.ServiceError): Error {
+/**
+ * Map a per-message EnqueueResult error to an SDK error.
+ * The unified proto uses typed EnqueueError with an error code.
+ */
+function mapResultError(code: string, message: string): Error {
+  if (code === "ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND") {
+    return new QueueNotFoundError(`enqueue: ${message}`);
+  }
+  return new RPCError(grpc.status.INTERNAL, message);
+}
+
+function mapTransportError(err: grpc.ServiceError): Error {
   if (err.code === grpc.status.NOT_FOUND) {
     return new QueueNotFoundError(`enqueue: ${err.details}`);
   }
@@ -28,7 +38,8 @@ function mapEnqueueError(err: grpc.ServiceError): Error {
 
 /**
  * Background batcher that collects enqueue() calls and flushes them
- * as batch RPCs. Supports auto (opportunistic) and linger (timer-based) modes.
+ * via the unified Enqueue RPC (which accepts repeated messages).
+ * Supports auto (opportunistic) and linger (timer-based) modes.
  */
 export class Batcher {
   private readonly grpcClient: FilaServiceClient;
@@ -41,6 +52,7 @@ export class Batcher {
   private closed = false;
   private drainResolvers: Array<() => void> = [];
   private lingerTimer: ReturnType<typeof setTimeout> | null = null;
+  private inFlightCount = 0;
 
   constructor(
     grpcClient: FilaServiceClient,
@@ -155,17 +167,18 @@ export class Batcher {
   private flushAll(): void {
     while (this.pending.length > 0) {
       const items = this.pending.splice(0, this.maxBatchSize);
-      // Fire-and-forget: flush concurrently.
+      this.inFlightCount++;
       this.flushBatch(items).then(() => {
+        this.inFlightCount--;
         this.notifyDrainComplete();
       });
     }
-    // Also check drain in case pending was already empty.
+    // Also check drain in case pending was already empty and nothing in-flight.
     this.notifyDrainComplete();
   }
 
   private notifyDrainComplete(): void {
-    if (this.pending.length === 0 && this.drainResolvers.length > 0) {
+    if (this.pending.length === 0 && this.inFlightCount === 0 && this.drainResolvers.length > 0) {
       const resolvers = this.drainResolvers.splice(0);
       for (const resolve of resolvers) {
         resolve();
@@ -174,43 +187,12 @@ export class Batcher {
   }
 
   /**
-   * Flush a batch of items. Single item uses Enqueue RPC (preserves error
-   * types like QueueNotFoundError). Multiple items use BatchEnqueue.
+   * Flush a batch of items via the unified Enqueue RPC (repeated messages).
+   * All items -- single or multiple -- use the same RPC.
    */
-  private async flushBatch(items: BatchItem[]): Promise<void> {
-    if (items.length === 0) return;
+  private flushBatch(items: BatchItem[]): Promise<void> {
+    if (items.length === 0) return Promise.resolve();
 
-    if (items.length === 1) {
-      return this.flushSingle(items[0]);
-    }
-
-    return this.flushMultiple(items);
-  }
-
-  /** Flush a single item via the regular Enqueue RPC. */
-  private flushSingle(item: BatchItem): Promise<void> {
-    return new Promise<void>((resolve) => {
-      this.grpcClient.enqueue(
-        {
-          queue: item.message.queue,
-          headers: item.message.headers,
-          payload: item.message.payload,
-        },
-        this.callMetadata(),
-        (err: grpc.ServiceError | null, resp?: EnqueueResponse__Output) => {
-          if (err) {
-            item.reject(mapEnqueueError(err));
-          } else {
-            item.resolve(resp!.messageId);
-          }
-          resolve();
-        }
-      );
-    });
-  }
-
-  /** Flush multiple items via the BatchEnqueue RPC. */
-  private flushMultiple(items: BatchItem[]): Promise<void> {
     const messages = items.map((item) => ({
       queue: item.message.queue,
       headers: item.message.headers,
@@ -218,16 +200,13 @@ export class Batcher {
     }));
 
     return new Promise<void>((resolve) => {
-      this.grpcClient.batchEnqueue(
+      this.grpcClient.enqueue(
         { messages },
         this.callMetadata(),
-        (
-          err: grpc.ServiceError | null,
-          resp?: BatchEnqueueResponse__Output
-        ) => {
+        (err: grpc.ServiceError | null, resp?: EnqueueResponse__Output) => {
           if (err) {
             // Transport-level failure: all items get the error.
-            const mapped = new RPCError(err.code, err.details);
+            const mapped = mapTransportError(err);
             for (const item of items) {
               item.reject(mapped);
             }
@@ -244,11 +223,11 @@ export class Batcher {
                 );
                 continue;
               }
-              if (result.result === "success" && result.success) {
-                items[i].resolve(result.success.messageId!);
+              if (result.result === "messageId" && result.messageId) {
+                items[i].resolve(result.messageId);
               } else if (result.result === "error" && result.error) {
                 items[i].reject(
-                  new RPCError(grpc.status.INTERNAL, result.error)
+                  mapResultError(result.error.code, result.error.message)
                 );
               } else {
                 items[i].reject(
@@ -262,5 +241,4 @@ export class Batcher {
       );
     });
   }
-
 }

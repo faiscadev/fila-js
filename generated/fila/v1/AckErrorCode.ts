@@ -1,0 +1,20 @@
+// Original file: proto/fila/v1/service.proto
+
+export const AckErrorCode = {
+  ACK_ERROR_CODE_UNSPECIFIED: 'ACK_ERROR_CODE_UNSPECIFIED',
+  ACK_ERROR_CODE_MESSAGE_NOT_FOUND: 'ACK_ERROR_CODE_MESSAGE_NOT_FOUND',
+  ACK_ERROR_CODE_STORAGE: 'ACK_ERROR_CODE_STORAGE',
+  ACK_ERROR_CODE_PERMISSION_DENIED: 'ACK_ERROR_CODE_PERMISSION_DENIED',
+} as const;
+
+export type AckErrorCode =
+  | 'ACK_ERROR_CODE_UNSPECIFIED'
+  | 0
+  | 'ACK_ERROR_CODE_MESSAGE_NOT_FOUND'
+  | 1
+  | 'ACK_ERROR_CODE_STORAGE'
+  | 2
+  | 'ACK_ERROR_CODE_PERMISSION_DENIED'
+  | 3
+
+export type AckErrorCode__Output = typeof AckErrorCode[keyof typeof AckErrorCode]

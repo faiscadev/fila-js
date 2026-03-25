@@ -7,7 +7,7 @@ import {
   type TestServer,
 } from "./helpers";
 
-describe.skipIf(!FILA_SERVER_AVAILABLE)("Batch operations", () => {
+describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
   let server: TestServer;
 
   beforeAll(async () => {
@@ -18,16 +18,16 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Batch operations", () => {
     server?.stop();
   });
 
-  describe("batchEnqueue", () => {
+  describe("enqueueMany", () => {
     it("enqueues multiple messages in a single RPC", async () => {
-      await server.createQueue("batch-multi");
+      await server.createQueue("multi-enqueue");
 
       const client = new Client(server.addr, { batchMode: "disabled" });
       try {
-        const results = await client.batchEnqueue([
-          { queue: "batch-multi", headers: { idx: "0" }, payload: Buffer.from("msg-0") },
-          { queue: "batch-multi", headers: { idx: "1" }, payload: Buffer.from("msg-1") },
-          { queue: "batch-multi", headers: { idx: "2" }, payload: Buffer.from("msg-2") },
+        const results = await client.enqueueMany([
+          { queue: "multi-enqueue", headers: { idx: "0" }, payload: Buffer.from("msg-0") },
+          { queue: "multi-enqueue", headers: { idx: "1" }, payload: Buffer.from("msg-1") },
+          { queue: "multi-enqueue", headers: { idx: "2" }, payload: Buffer.from("msg-2") },
         ]);
 
         expect(results).toHaveLength(3);
@@ -41,9 +41,9 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Batch operations", () => {
         // Verify all messages are consumable.
         const received: string[] = [];
         let count = 0;
-        for await (const msg of client.consume("batch-multi")) {
+        for await (const msg of client.consume("multi-enqueue")) {
           received.push(msg.payload.toString());
-          await client.ack("batch-multi", msg.id);
+          await client.ack("multi-enqueue", msg.id);
           count++;
           if (count >= 3) break;
         }
@@ -56,12 +56,12 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Batch operations", () => {
     });
 
     it("returns per-message errors for nonexistent queues", async () => {
-      await server.createQueue("batch-partial");
+      await server.createQueue("multi-partial");
 
       const client = new Client(server.addr, { batchMode: "disabled" });
       try {
-        const results = await client.batchEnqueue([
-          { queue: "batch-partial", headers: {}, payload: Buffer.from("ok") },
+        const results = await client.enqueueMany([
+          { queue: "multi-partial", headers: {}, payload: Buffer.from("ok") },
           { queue: "no-such-queue", headers: {}, payload: Buffer.from("fail") },
         ]);
 
@@ -77,13 +77,13 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Batch operations", () => {
     });
 
     it("returns message IDs in same order as input", async () => {
-      await server.createQueue("batch-order");
+      await server.createQueue("multi-order");
 
       const client = new Client(server.addr, { batchMode: "disabled" });
       try {
-        const results = await client.batchEnqueue([
-          { queue: "batch-order", headers: {}, payload: Buffer.from("first") },
-          { queue: "batch-order", headers: {}, payload: Buffer.from("second") },
+        const results = await client.enqueueMany([
+          { queue: "multi-order", headers: {}, payload: Buffer.from("first") },
+          { queue: "multi-order", headers: {}, payload: Buffer.from("second") },
         ]);
 
         expect(results).toHaveLength(2);
@@ -157,7 +157,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Batch operations", () => {
       const client = new Client(server.addr);
       try {
         // Single message to nonexistent queue: should get QueueNotFoundError
-        // because single-item batches use Enqueue RPC.
+        // because the per-result error code is mapped to QueueNotFoundError.
         await expect(
           client.enqueue("no-such-queue-auto", null, Buffer.from("fail"))
         ).rejects.toThrow(QueueNotFoundError);

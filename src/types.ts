@@ -24,7 +24,7 @@ export interface EnqueueMessage {
   payload: Buffer;
 }
 
-/** The result of a single message within a batch enqueue call. */
-export type BatchEnqueueResult =
+/** The result of a single message within an enqueue call. */
+export type EnqueueResult =
   | { success: true; messageId: string }
   | { success: false; error: string };
