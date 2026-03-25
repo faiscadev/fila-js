@@ -9,9 +9,11 @@ import {
   QueueNotFoundError,
   RPCError,
 } from "./errors";
-import type { ConsumeMessage, EnqueueMessage, BatchEnqueueResult } from "./types";
+import type { ConsumeMessage, EnqueueMessage, EnqueueResult } from "./types";
 import type { FilaServiceClient } from "../generated/fila/v1/FilaService";
 import type { EnqueueResponse__Output } from "../generated/fila/v1/EnqueueResponse";
+import type { AckResponse__Output } from "../generated/fila/v1/AckResponse";
+import type { NackResponse__Output } from "../generated/fila/v1/NackResponse";
 import type { ConsumeResponse__Output } from "../generated/fila/v1/ConsumeResponse";
 import { Batcher, type BatchMode } from "./batcher";
 
@@ -85,52 +87,49 @@ function mapConsumeError(err: grpc.ServiceError): FilaError {
   return new RPCError(err.code, err.details);
 }
 
-function mapAckError(err: grpc.ServiceError): FilaError {
-  if (err.code === grpc.status.NOT_FOUND) {
-    return new MessageNotFoundError(`ack: ${err.details}`);
+/**
+ * Map a per-message EnqueueResult error code to an SDK error type.
+ */
+function mapEnqueueResultError(code: string, message: string): FilaError {
+  if (code === "ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND") {
+    return new QueueNotFoundError(`enqueue: ${message}`);
   }
-  return new RPCError(err.code, err.details);
+  return new RPCError(grpc.status.INTERNAL, message);
 }
 
-function mapNackError(err: grpc.ServiceError): FilaError {
-  if (err.code === grpc.status.NOT_FOUND) {
-    return new MessageNotFoundError(`nack: ${err.details}`);
+/**
+ * Map a per-message AckResult error code to an SDK error type.
+ */
+function mapAckResultError(code: string, message: string): FilaError {
+  if (code === "ACK_ERROR_CODE_MESSAGE_NOT_FOUND") {
+    return new MessageNotFoundError(`ack: ${message}`);
   }
-  return new RPCError(err.code, err.details);
+  return new RPCError(grpc.status.INTERNAL, message);
+}
+
+/**
+ * Map a per-message NackResult error code to an SDK error type.
+ */
+function mapNackResultError(code: string, message: string): FilaError {
+  if (code === "NACK_ERROR_CODE_MESSAGE_NOT_FOUND") {
+    return new MessageNotFoundError(`nack: ${message}`);
+  }
+  return new RPCError(grpc.status.INTERNAL, message);
 }
 
 /** Map a ConsumeResponse to ConsumeMessage(s), skipping keepalive frames. */
 function mapConsumeResponse(
   resp: ConsumeResponse__Output
 ): ConsumeMessage[] {
-  // Prefer the batched `messages` field when non-empty.
-  if (resp.messages && resp.messages.length > 0) {
-    const results: ConsumeMessage[] = [];
-    for (const msg of resp.messages) {
-      if (!msg || !msg.id) continue;
-      const metadata = msg.metadata;
-      results.push({
-        id: msg.id,
-        headers: msg.headers ?? {},
-        payload: Buffer.isBuffer(msg.payload)
-          ? msg.payload
-          : Buffer.from(msg.payload ?? ""),
-        fairnessKey: metadata?.fairnessKey ?? "",
-        attemptCount: metadata?.attemptCount ?? 0,
-        queue: metadata?.queueId ?? "",
-      });
-    }
-    return results;
-  }
-
-  // Fall back to singular `message` field (backward compatible).
-  const msg = resp.message;
-  if (!msg || !msg.id) {
+  if (!resp.messages || resp.messages.length === 0) {
     return []; // keepalive frame
   }
-  const metadata = msg.metadata;
-  return [
-    {
+
+  const results: ConsumeMessage[] = [];
+  for (const msg of resp.messages) {
+    if (!msg || !msg.id) continue;
+    const metadata = msg.metadata;
+    results.push({
       id: msg.id,
       headers: msg.headers ?? {},
       payload: Buffer.isBuffer(msg.payload)
@@ -139,8 +138,9 @@ function mapConsumeResponse(
       fairnessKey: metadata?.fairnessKey ?? "",
       attemptCount: metadata?.attemptCount ?? 0,
       queue: metadata?.queueId ?? "",
-    },
-  ];
+    });
+  }
+  return results;
 }
 
 /** Connection options for TLS, authentication, and batching. */
@@ -292,7 +292,7 @@ export class Client {
    *
    * When batching is enabled (default), the message is routed through the
    * batcher. At low load, messages are sent individually. At high load,
-   * messages cluster naturally into BatchEnqueue RPCs.
+   * messages cluster naturally into larger Enqueue RPCs.
    *
    * @param queue - Target queue name.
    * @param headers - Optional message headers.
@@ -315,16 +315,27 @@ export class Client {
       });
     }
 
-    // No batching: direct RPC.
+    // No batching: direct RPC with single message in the repeated field.
     return new Promise((resolve, reject) => {
       this.grpcClient.enqueue(
-        { queue, headers: headers ?? {}, payload },
+        { messages: [{ queue, headers: headers ?? {}, payload }] },
         this.callMetadata(),
         (err: grpc.ServiceError | null, resp?: EnqueueResponse__Output) => {
           if (err) {
             reject(mapEnqueueError(err));
+            return;
+          }
+          const result = resp!.results[0];
+          if (!result) {
+            reject(new RPCError(grpc.status.INTERNAL, "no result from server"));
+            return;
+          }
+          if (result.result === "messageId" && result.messageId) {
+            resolve(result.messageId);
+          } else if (result.result === "error" && result.error) {
+            reject(mapEnqueueResultError(result.error.code, result.error.message));
           } else {
-            resolve(resp!.messageId);
+            reject(new RPCError(grpc.status.INTERNAL, "no result from server"));
           }
         }
       );
@@ -332,60 +343,53 @@ export class Client {
   }
 
   /**
-   * Enqueue a batch of messages in a single RPC call.
+   * Enqueue multiple messages in a single RPC call.
    *
    * Each message is independently validated and processed. A failed message
-   * does not affect the others in the batch. Returns one result per input
-   * message, in the same order.
+   * does not affect the others. Returns one result per input message,
+   * in the same order.
    *
-   * This is more efficient than calling enqueue() in a loop because it
-   * amortizes the RPC overhead across all messages.
+   * This always bypasses the batcher and issues a direct Enqueue RPC.
    *
    * @param messages - Array of messages to enqueue.
    * @returns Per-message results (success with messageId, or error with description).
-   * @throws {RPCError} For transport-level failures affecting the entire batch.
+   * @throws {RPCError} For transport-level failures affecting the entire call.
    */
-  batchEnqueue(messages: EnqueueMessage[]): Promise<BatchEnqueueResult[]> {
-    // batchEnqueue always bypasses the batcher and uses a direct RPC.
-    // Create a temporary batcher-like object to reuse the RPC logic,
-    // or just call the gRPC client directly.
-    return this.doBatchEnqueue(messages);
-  }
-
-  private doBatchEnqueue(messages: EnqueueMessage[]): Promise<BatchEnqueueResult[]> {
+  enqueueMany(messages: EnqueueMessage[]): Promise<EnqueueResult[]> {
     const protoMessages = messages.map((m) => ({
       queue: m.queue,
       headers: m.headers,
       payload: m.payload,
     }));
 
-    return new Promise<BatchEnqueueResult[]>((resolve, reject) => {
-      this.grpcClient.batchEnqueue(
+    return new Promise<EnqueueResult[]>((resolve, reject) => {
+      this.grpcClient.enqueue(
         { messages: protoMessages },
         this.callMetadata(),
-        (err: grpc.ServiceError | null, resp?) => {
+        (err: grpc.ServiceError | null, resp?: EnqueueResponse__Output) => {
           if (err) {
             reject(new RPCError(err.code, err.details));
             return;
           }
 
-          const results: BatchEnqueueResult[] = resp!.results.map(
-            (r: { result?: string; success?: { messageId?: string } | null; error?: string }) => {
-              if (r.result === "success" && r.success) {
-                return {
-                  success: true as const,
-                  messageId: r.success.messageId!,
-                };
-              } else if (r.result === "error" && r.error) {
-                return { success: false as const, error: r.error };
-              } else {
-                return {
-                  success: false as const,
-                  error: "no result from server",
-                };
-              }
+          const results: EnqueueResult[] = resp!.results.map((r) => {
+            if (r.result === "messageId" && r.messageId) {
+              return {
+                success: true as const,
+                messageId: r.messageId,
+              };
+            } else if (r.result === "error" && r.error) {
+              return {
+                success: false as const,
+                error: r.error.message,
+              };
+            } else {
+              return {
+                success: false as const,
+                error: "no result from server",
+              };
             }
-          );
+          });
 
           resolve(results);
         }
@@ -397,9 +401,9 @@ export class Client {
    * Open a streaming consumer on the specified queue.
    *
    * Returns an async iterable that yields messages as they become available.
-   * Nil message frames (keepalive signals) are skipped automatically.
-   * Batched delivery frames (multiple messages per ConsumeResponse) are
-   * transparently unpacked into individual messages.
+   * Empty response frames (keepalive signals) are skipped automatically.
+   * Delivery frames containing multiple messages are transparently unpacked
+   * into individual messages.
    *
    * If the server returns UNAVAILABLE with an `x-fila-leader-addr` metadata
    * header, the client transparently reconnects to the leader node and retries
@@ -489,13 +493,24 @@ export class Client {
   ack(queue: string, msgId: string): Promise<void> {
     return new Promise((resolve, reject) => {
       this.grpcClient.ack(
-        { queue, messageId: msgId },
+        { messages: [{ queue, messageId: msgId }] },
         this.callMetadata(),
-        (err: grpc.ServiceError | null) => {
+        (err: grpc.ServiceError | null, resp?: AckResponse__Output) => {
           if (err) {
-            reject(mapAckError(err));
-          } else {
+            reject(new RPCError(err.code, err.details));
+            return;
+          }
+          const result = resp!.results[0];
+          if (!result) {
+            reject(new RPCError(grpc.status.INTERNAL, "no result from server"));
+            return;
+          }
+          if (result.result === "success") {
             resolve();
+          } else if (result.result === "error" && result.error) {
+            reject(mapAckResultError(result.error.code, result.error.message));
+          } else {
+            reject(new RPCError(grpc.status.INTERNAL, "no result from server"));
           }
         }
       );
@@ -513,13 +528,24 @@ export class Client {
   nack(queue: string, msgId: string, error: string): Promise<void> {
     return new Promise((resolve, reject) => {
       this.grpcClient.nack(
-        { queue, messageId: msgId, error },
+        { messages: [{ queue, messageId: msgId, error }] },
         this.callMetadata(),
-        (err: grpc.ServiceError | null) => {
+        (err: grpc.ServiceError | null, resp?: NackResponse__Output) => {
           if (err) {
-            reject(mapNackError(err));
-          } else {
+            reject(new RPCError(err.code, err.details));
+            return;
+          }
+          const result = resp!.results[0];
+          if (!result) {
+            reject(new RPCError(grpc.status.INTERNAL, "no result from server"));
+            return;
+          }
+          if (result.result === "success") {
             resolve();
+          } else if (result.result === "error" && result.error) {
+            reject(mapNackResultError(result.error.code, result.error.message));
+          } else {
+            reject(new RPCError(grpc.status.INTERNAL, "no result from server"));
           }
         }
       );
