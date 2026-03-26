@@ -2,9 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import * as grpc from "@grpc/grpc-js";
 import { Client } from "../src";
-import { RPCError } from "../src/errors";
+import { UnauthenticatedError } from "../src/errors";
 import {
   startTestServer,
   generateTestCerts,
@@ -22,7 +21,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         extraConfig: `[auth]\nbootstrap_apikey = "${BOOTSTRAP_KEY}"`,
         adminApiKey: BOOTSTRAP_KEY,
       });
-    });
+    }, 30_000);
 
     afterAll(() => {
       server?.stop();
@@ -49,11 +48,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
       try {
         await expect(
           client.enqueue("auth-test-nokey", null, Buffer.from("fail"))
-        ).rejects.toSatisfy((err: unknown) => {
-          expect(err).toBeInstanceOf(RPCError);
-          expect((err as RPCError).code).toBe(grpc.status.UNAUTHENTICATED);
-          return true;
-        });
+        ).rejects.toBeInstanceOf(UnauthenticatedError);
       } finally {
         await client.close();
       }
@@ -65,7 +60,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
       try {
         await expect(
           client.enqueue("auth-test-badkey", null, Buffer.from("fail"))
-        ).rejects.toThrow(RPCError);
+        ).rejects.toBeInstanceOf(UnauthenticatedError);
       } finally {
         await client.close();
       }
@@ -102,15 +97,13 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
       const serverCertPath = path.join(certDir, "server.pem");
       const serverKeyPath = path.join(certDir, "server.key");
 
-      const adminCreds = grpc.credentials.createSsl(certs.caCert);
-
       server = await startTestServer({
         extraConfig: [
           `[tls]`,
           `cert_file = "${serverCertPath}"`,
           `key_file = "${serverKeyPath}"`,
         ].join("\n"),
-        adminCreds,
+        adminCaCert: certs.caCert,
       });
     }, 30_000);
 
@@ -159,12 +152,6 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
       const serverKeyPath = path.join(certDir, "server.key");
       const caCertPath = path.join(certDir, "ca.pem");
 
-      const adminCreds = grpc.credentials.createSsl(
-        certs.caCert,
-        certs.clientKey,
-        certs.clientCert
-      );
-
       server = await startTestServer({
         extraConfig: [
           `[tls]`,
@@ -174,7 +161,9 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
           `[auth]`,
           `bootstrap_apikey = "${BOOTSTRAP_KEY}"`,
         ].join("\n"),
-        adminCreds,
+        adminCaCert: certs.caCert,
+        adminClientCert: certs.clientCert,
+        adminClientKey: certs.clientKey,
         adminApiKey: BOOTSTRAP_KEY,
       });
     }, 30_000);

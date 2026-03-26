@@ -12,7 +12,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Client", () => {
 
   beforeAll(async () => {
     server = await startTestServer();
-  });
+  }, 30_000);
 
   afterAll(() => {
     server?.stop();

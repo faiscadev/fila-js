@@ -1,9 +1,16 @@
-import * as grpc from "@grpc/grpc-js";
-
-import { QueueNotFoundError, RPCError } from "./errors";
+import {
+  QueueNotFoundError,
+  RPCError,
+  UnauthenticatedError,
+} from "./errors";
 import type { EnqueueMessage } from "./types";
-import type { FilaServiceClient } from "../generated/fila/v1/FilaService";
-import type { EnqueueResponse__Output } from "../generated/fila/v1/EnqueueResponse";
+import {
+  FibpConnection,
+  Op,
+  ErrCode,
+  encodeEnqueuePayload,
+  decodeEnqueueResponse,
+} from "./transport";
 
 /** Controls how the SDK batches enqueue() calls. */
 export type BatchMode =
@@ -18,32 +25,24 @@ interface BatchItem {
   reject: (err: Error) => void;
 }
 
-/**
- * Map a per-message EnqueueResult error to an SDK error.
- * The unified proto uses typed EnqueueError with an error code.
- */
-function mapResultError(code: string, message: string): Error {
-  if (code === "ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND") {
-    return new QueueNotFoundError(`enqueue: ${message}`);
+function mapEnqueueWireError(errCode: number, errMsg: string): Error {
+  switch (errCode) {
+    case ErrCode.QUEUE_NOT_FOUND:
+      return new QueueNotFoundError(`enqueue: ${errMsg}`);
+    case ErrCode.UNAUTHORIZED:
+      return new UnauthenticatedError(`enqueue: ${errMsg}`);
+    default:
+      return new RPCError(errCode, errMsg);
   }
-  return new RPCError(grpc.status.INTERNAL, message);
-}
-
-function mapTransportError(err: grpc.ServiceError): Error {
-  if (err.code === grpc.status.NOT_FOUND) {
-    return new QueueNotFoundError(`enqueue: ${err.details}`);
-  }
-  return new RPCError(err.code, err.details);
 }
 
 /**
  * Background batcher that collects enqueue() calls and flushes them
- * via the unified Enqueue RPC (which accepts repeated messages).
+ * via the FIBP ENQUEUE op (which accepts repeated messages per queue).
  * Supports auto (opportunistic) and linger (timer-based) modes.
  */
 export class Batcher {
-  private readonly grpcClient: FilaServiceClient;
-  private readonly callMetadata: () => grpc.Metadata;
+  private readonly getConn: () => FibpConnection;
   private readonly batchMode: BatchMode;
   private readonly maxBatchSize: number;
 
@@ -55,12 +54,10 @@ export class Batcher {
   private inFlightCount = 0;
 
   constructor(
-    grpcClient: FilaServiceClient,
-    callMetadata: () => grpc.Metadata,
+    getConn: () => FibpConnection,
     batchMode: BatchMode
   ) {
-    this.grpcClient = grpcClient;
-    this.callMetadata = callMetadata;
+    this.getConn = getConn;
     this.batchMode = batchMode;
 
     if (batchMode.mode === "auto") {
@@ -79,7 +76,7 @@ export class Batcher {
   submit(message: EnqueueMessage): Promise<string> {
     if (this.closed) {
       return Promise.reject(
-        new RPCError(grpc.status.UNAVAILABLE, "batcher is closed")
+        new RPCError(ErrCode.INTERNAL, "batcher is closed")
       );
     }
 
@@ -122,8 +119,6 @@ export class Batcher {
   /**
    * Auto mode: schedule a flush via setImmediate. Messages that arrive
    * within the same event loop turn will cluster into the same batch.
-   * At low load, each message is sent individually. At high load,
-   * messages naturally batch together.
    */
   private scheduleAutoFlush(): void {
     if (this.flushScheduled) return;
@@ -142,7 +137,6 @@ export class Batcher {
   private scheduleLingerFlush(): void {
     if (this.batchMode.mode !== "linger") return;
 
-    // If batch is full, flush immediately.
     if (this.pending.length >= this.batchMode.batchSize) {
       if (this.lingerTimer !== null) {
         clearTimeout(this.lingerTimer);
@@ -152,7 +146,6 @@ export class Batcher {
       return;
     }
 
-    // Start timer if not already running.
     if (this.lingerTimer === null) {
       this.lingerTimer = setTimeout(() => {
         this.lingerTimer = null;
@@ -161,9 +154,7 @@ export class Batcher {
     }
   }
 
-  /**
-   * Flush all pending items, splitting into maxBatchSize chunks.
-   */
+  /** Flush all pending items, splitting into maxBatchSize chunks. */
   private flushAll(): void {
     while (this.pending.length > 0) {
       const items = this.pending.splice(0, this.maxBatchSize);
@@ -173,7 +164,6 @@ export class Batcher {
         this.notifyDrainComplete();
       });
     }
-    // Also check drain in case pending was already empty and nothing in-flight.
     this.notifyDrainComplete();
   }
 
@@ -187,58 +177,66 @@ export class Batcher {
   }
 
   /**
-   * Flush a batch of items via the unified Enqueue RPC (repeated messages).
-   * All items -- single or multiple -- use the same RPC.
+   * Flush a batch of items via FIBP ENQUEUE.
+   * Items for the same queue are sent in a single frame.
+   * Items for different queues are sent as separate frames (sequentially).
    */
-  private flushBatch(items: BatchItem[]): Promise<void> {
-    if (items.length === 0) return Promise.resolve();
+  private async flushBatch(items: BatchItem[]): Promise<void> {
+    if (items.length === 0) return;
 
+    // Group by queue to preserve per-queue batch semantics.
+    const byQueue = new Map<string, BatchItem[]>();
+    for (const item of items) {
+      const q = item.message.queue;
+      if (!byQueue.has(q)) byQueue.set(q, []);
+      byQueue.get(q)!.push(item);
+    }
+
+    for (const [, queueItems] of byQueue) {
+      await this.flushQueueBatch(queueItems);
+    }
+  }
+
+  private async flushQueueBatch(items: BatchItem[]): Promise<void> {
     const messages = items.map((item) => ({
       queue: item.message.queue,
       headers: item.message.headers,
       payload: item.message.payload,
     }));
 
-    return new Promise<void>((resolve) => {
-      this.grpcClient.enqueue(
-        { messages },
-        this.callMetadata(),
-        (err: grpc.ServiceError | null, resp?: EnqueueResponse__Output) => {
-          if (err) {
-            // Transport-level failure: all items get the error.
-            const mapped = mapTransportError(err);
-            for (const item of items) {
-              item.reject(mapped);
-            }
-          } else {
-            const results = resp!.results;
-            for (let i = 0; i < items.length; i++) {
-              const result = results[i];
-              if (!result) {
-                items[i].reject(
-                  new RPCError(
-                    grpc.status.INTERNAL,
-                    "server returned fewer results than messages sent"
-                  )
-                );
-                continue;
-              }
-              if (result.result === "messageId" && result.messageId) {
-                items[i].resolve(result.messageId);
-              } else if (result.result === "error" && result.error) {
-                items[i].reject(
-                  mapResultError(result.error.code, result.error.message)
-                );
-              } else {
-                items[i].reject(
-                  new RPCError(grpc.status.INTERNAL, "no result from server")
-                );
-              }
-            }
-          }
-          resolve();
-        }
-      );
-    });
+    let respFrame;
+    try {
+      const conn = this.getConn();
+      const payload = encodeEnqueuePayload(messages);
+      respFrame = await conn.request(Op.ENQUEUE, payload);
+    } catch (err) {
+      // Transport-level failure: remap typed errors then propagate to all batch items.
+      let mapped: Error;
+      if (err instanceof RPCError) {
+        mapped = mapEnqueueWireError(err.code, err.detail);
+      } else if (err instanceof Error) {
+        mapped = err;
+      } else {
+        mapped = new RPCError(ErrCode.INTERNAL, String(err));
+      }
+      for (const item of items) {
+        item.reject(mapped);
+      }
+      return;
+    }
+
+    const results = decodeEnqueueResponse(respFrame.payload);
+    for (let i = 0; i < items.length; i++) {
+      const result = results[i];
+      if (!result) {
+        items[i].reject(new RPCError(ErrCode.INTERNAL, "server returned fewer results than messages sent"));
+        continue;
+      }
+      if (result.ok) {
+        items[i].resolve(result.msgId);
+      } else {
+        items[i].reject(mapEnqueueWireError(result.errCode, result.errMsg));
+      }
+    }
   }
 }
