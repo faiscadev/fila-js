@@ -509,17 +509,23 @@ export class FibpConnection extends EventEmitter {
    * Open a consume stream.
    *
    * Protocol:
-   *   1. Send the CONSUME request frame with a fresh corrId.
-   *   2. Wait for the server's ack frame (same corrId, no FLAG_PUSH) — this
-   *      confirms the queue exists and the subscription is active.
-   *   3. Register a push handler so subsequent FLAG_PUSH frames (corrId == 0)
-   *      are delivered to the returned async iterable.
+   *   1. Guard against concurrent streams — only one consume stream is allowed
+   *      per connection at a time.
+   *   2. Register the push handler BEFORE sending the CONSUME request so that
+   *      PUSH frames arriving in the same TCP chunk as the subscribe ACK are
+   *      buffered rather than dropped.
+   *   3. Send the CONSUME request frame with a fresh corrId and wait for the
+   *      server's ack frame (same corrId, no FLAG_PUSH) — this confirms the
+   *      queue exists and the subscription is active.
+   *   4. On error, clear the push handler and re-throw.
    *
    * Returns an async iterable of push frames and a cancel function.
    */
   async openConsumeStream(payload: Buffer): Promise<{ iter: AsyncIterable<Frame>; cancel: () => void }> {
-    // First, wait for the subscribe ack (request/response).
-    await this.request(Op.CONSUME, payload);
+    // Guard: only one consume stream per connection.
+    if (this.pushHandler !== null) {
+      throw new FilaError("a consume stream is already active on this connection");
+    }
 
     // Build an async iterable backed by a simple queue + promise chain.
     const frameQueue: Frame[] = [];
@@ -553,7 +559,20 @@ export class FibpConnection extends EventEmitter {
       }
     };
 
+    // Register the push handler BEFORE sending the subscribe request.
+    // PUSH frames can arrive in the same TCP chunk as the subscribe ACK; if we
+    // waited until after the await they would be dispatched while pushHandler is
+    // still null and silently dropped.
     this.pushHandler = { push, end };
+
+    // Wait for the subscribe ack (request/response). On failure, clear the
+    // handler so the connection can be reused or future streams can be opened.
+    try {
+      await this.request(Op.CONSUME, payload);
+    } catch (err) {
+      this.pushHandler = null;
+      throw err;
+    }
 
     const cancel = () => end();
 
