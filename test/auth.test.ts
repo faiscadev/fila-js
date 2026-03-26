@@ -21,7 +21,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         extraConfig: `[auth]\nbootstrap_apikey = "${BOOTSTRAP_KEY}"`,
         adminApiKey: BOOTSTRAP_KEY,
       });
-    });
+    }, 30_000);
 
     afterAll(() => {
       server?.stop();
