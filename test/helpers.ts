@@ -134,7 +134,7 @@ export async function startTestServer(
 
   // Write config file.
   const configPath = path.join(dataDir, "fila.toml");
-  let config = `[server]\nlisten_addr = "${addr}"\n`;
+  let config = `[fibp]\nlisten_addr = "${addr}"\n`;
   if (opts?.extraConfig) {
     config += opts.extraConfig + "\n";
   }
