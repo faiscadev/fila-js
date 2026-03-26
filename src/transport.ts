@@ -210,7 +210,6 @@ export interface WireMessage {
   payload: Buffer;
   fairnessKey: string;
   attemptCount: number;
-  queue: string;
 }
 
 /**
@@ -221,12 +220,14 @@ export interface WireMessage {
  *
  * Each message:
  *   id_len:u16BE + id:utf8
- *   queue_len:u16BE + queue:utf8
  *   fairness_key_len:u16BE + fairness_key:utf8
  *   attempt_count:u32BE
  *   header_count:u8
  *   headers: repeated(key_len:u16BE+key + val_len:u16BE+val)
  *   payload_len:u32BE + payload
+ *
+ * Note: the queue name is NOT included in the push frame; callers supply it
+ * from the subscribe context.
  */
 export function decodeConsumeDelivery(payload: Buffer): WireMessage[] {
   let offset = 0;
@@ -237,10 +238,6 @@ export function decodeConsumeDelivery(payload: Buffer): WireMessage[] {
     // id
     const idLen = payload.readUInt16BE(offset); offset += 2;
     const id = payload.subarray(offset, offset + idLen).toString("utf8"); offset += idLen;
-
-    // queue
-    const queueLen = payload.readUInt16BE(offset); offset += 2;
-    const queue = payload.subarray(offset, offset + queueLen).toString("utf8"); offset += queueLen;
 
     // fairness key
     const fkLen = payload.readUInt16BE(offset); offset += 2;
@@ -264,7 +261,7 @@ export function decodeConsumeDelivery(payload: Buffer): WireMessage[] {
     const payloadLen = payload.readUInt32BE(offset); offset += 4;
     const msgPayload = Buffer.from(payload.subarray(offset, offset + payloadLen)); offset += payloadLen;
 
-    messages.push({ id, queue, fairnessKey, attemptCount, headers, payload: msgPayload });
+    messages.push({ id, fairnessKey, attemptCount, headers, payload: msgPayload });
   }
 
   return messages;
@@ -348,30 +345,55 @@ export function decodeAckNackResponse(payload: Buffer): AckNackItemResult[] {
 
 // ---- Auth encoding ----------------------------------------------------------
 
-/** Encode an AUTH frame payload: key_len:u16BE + key:utf8 */
+/** Encode an AUTH frame payload: raw UTF-8 key bytes (no length prefix) */
 export function encodeAuthPayload(apiKey: string): Buffer {
-  const keyBuf = Buffer.from(apiKey, "utf8");
-  const buf = Buffer.allocUnsafe(2 + keyBuf.length);
-  buf.writeUInt16BE(keyBuf.length, 0);
-  keyBuf.copy(buf, 2);
-  return buf;
+  return Buffer.from(apiKey, "utf8");
 }
 
 // ---- Error frame decoding ---------------------------------------------------
 
-/** Decode an ERROR frame payload: err_code:u16BE + msg_len:u16BE + msg:utf8 */
+/**
+ * Decode an ERROR frame payload.
+ *
+ * The server sends the error message as raw UTF-8 bytes with no framing.
+ * Map well-known substrings to typed ErrCode values; unknown messages use
+ * ErrCode.INTERNAL.
+ */
 export function decodeErrorPayload(payload: Buffer): { code: number; message: string } {
-  const code = payload.readUInt16BE(0);
-  const msgLen = payload.readUInt16BE(2);
-  const message = payload.subarray(4, 4 + msgLen).toString("utf8");
+  const message = payload.toString("utf8");
+  let code: number;
+  if (
+    message.includes("permission denied") ||
+    message.includes("unauthorized") ||
+    message.includes("invalid or missing api key") ||
+    message.includes("invalid api key") ||
+    message.includes("unauthenticated") ||
+    message.includes("authentication required")
+  ) {
+    code = ErrCode.UNAUTHORIZED;
+  } else if (message.includes("queue not found") || message.includes("queue does not exist")) {
+    code = ErrCode.QUEUE_NOT_FOUND;
+  } else if (message.includes("message not found")) {
+    code = ErrCode.MESSAGE_NOT_FOUND;
+  } else {
+    code = ErrCode.INTERNAL;
+  }
   return { code, message };
 }
 
 // ---- Connection class -------------------------------------------------------
 
 type PendingEntry =
-  | { kind: "once"; resolve: (frame: Frame) => void; reject: (err: Error) => void }
-  | { kind: "stream"; push: (frame: Frame) => void; end: (err?: Error) => void };
+  | { kind: "once"; resolve: (frame: Frame) => void; reject: (err: Error) => void };
+
+/**
+ * Handler for server-push frames (FLAG_PUSH set, corrId == 0).
+ * Only one consume stream may be active per connection.
+ */
+type PushHandler = {
+  push: (frame: Frame) => void;
+  end: (err?: Error) => void;
+};
 
 /**
  * A multiplexed FIBP connection over a single TCP (or TLS) socket.
@@ -387,8 +409,11 @@ export class FibpConnection extends EventEmitter {
   private pending = new Map<number, PendingEntry>();
   private _closed = false;
 
-  /** push listeners for server-initiated push frames (corrId == 0) */
-  private pushHandlers = new Map<string, (frame: Frame) => void>();
+  /**
+   * Handler for server-push frames (FLAG_PUSH set).
+   * Push frames use corrId == 0 and are NOT correlation-routed.
+   */
+  private pushHandler: PushHandler | null = null;
 
   private constructor(socket: net.Socket) {
     super();
@@ -481,17 +506,29 @@ export class FibpConnection extends EventEmitter {
   }
 
   /**
-   * Send a stream-initiation frame and return an AsyncIterable of pushed frames.
-   * Frames with FLAG_PUSH are dispatched here; the stream ends when the socket
-   * closes or the server sends a GOAWAY.
+   * Open a consume stream.
    *
-   * The corrId is returned so the caller can cancel if needed.
+   * Protocol:
+   *   1. Guard against concurrent streams — only one consume stream is allowed
+   *      per connection at a time.
+   *   2. Register the push handler BEFORE sending the CONSUME request so that
+   *      PUSH frames arriving in the same TCP chunk as the subscribe ACK are
+   *      buffered rather than dropped.
+   *   3. Send the CONSUME request frame with a fresh corrId and wait for the
+   *      server's ack frame (same corrId, no FLAG_PUSH) — this confirms the
+   *      queue exists and the subscription is active.
+   *   4. On error, clear the push handler and re-throw.
+   *
+   * Returns an async iterable of push frames and a cancel function.
    */
-  openStream(op: number, payload: Buffer): { corrId: number; iter: AsyncIterable<Frame> } {
-    const corrId = nextCorrId();
+  async openConsumeStream(payload: Buffer): Promise<{ iter: AsyncIterable<Frame>; cancel: () => void }> {
+    // Guard: only one consume stream per connection.
+    if (this.pushHandler !== null) {
+      throw new FilaError("a consume stream is already active on this connection");
+    }
 
-    // Build an async iterable backed by a queue + promise chain.
-    const queue: Frame[] = [];
+    // Build an async iterable backed by a simple queue + promise chain.
+    const frameQueue: Frame[] = [];
     let ended = false;
     let endError: Error | undefined;
     let waiter: { resolve: (v: IteratorResult<Frame>) => void; reject: (e: Error) => void } | null = null;
@@ -502,14 +539,15 @@ export class FibpConnection extends EventEmitter {
         waiter = null;
         w.resolve({ done: false, value: frame });
       } else {
-        queue.push(frame);
+        frameQueue.push(frame);
       }
     };
 
     const end = (err?: Error) => {
+      if (ended) return;
       ended = true;
       endError = err;
-      this.pending.delete(corrId);
+      this.pushHandler = null;
       if (waiter) {
         const w = waiter;
         waiter = null;
@@ -521,22 +559,29 @@ export class FibpConnection extends EventEmitter {
       }
     };
 
-    this.pending.set(corrId, { kind: "stream", push, end });
+    // Register the push handler BEFORE sending the subscribe request.
+    // PUSH frames can arrive in the same TCP chunk as the subscribe ACK; if we
+    // waited until after the await they would be dispatched while pushHandler is
+    // still null and silently dropped.
+    this.pushHandler = { push, end };
 
-    const frame = encodeFrame(op, corrId, payload);
-    this.socket.write(frame, (err) => {
-      if (err) {
-        this.pending.delete(corrId);
-        end(new FilaError(`write error: ${err.message}`));
-      }
-    });
+    // Wait for the subscribe ack (request/response). On failure, clear the
+    // handler so the connection can be reused or future streams can be opened.
+    try {
+      await this.request(Op.CONSUME, payload);
+    } catch (err) {
+      this.pushHandler = null;
+      throw err;
+    }
+
+    const cancel = () => end();
 
     const iter: AsyncIterable<Frame> = {
       [Symbol.asyncIterator]() {
         return {
           next(): Promise<IteratorResult<Frame>> {
-            if (queue.length > 0) {
-              return Promise.resolve({ done: false, value: queue.shift()! });
+            if (frameQueue.length > 0) {
+              return Promise.resolve({ done: false, value: frameQueue.shift()! });
             }
             if (ended) {
               if (endError) return Promise.reject(endError);
@@ -554,15 +599,7 @@ export class FibpConnection extends EventEmitter {
       },
     };
 
-    return { corrId, iter };
-  }
-
-  /** Cancel a stream by corrId (e.g. when consumer breaks out of for-await). */
-  cancelStream(corrId: number): void {
-    const entry = this.pending.get(corrId);
-    if (entry?.kind === "stream") {
-      entry.end();
-    }
+    return { iter, cancel };
   }
 
   // ---- Socket data handling -------------------------------------------------
@@ -592,49 +629,41 @@ export class FibpConnection extends EventEmitter {
 
     const frame: Frame = { flags, op, corrId, payload };
 
+    // Server push frames (FLAG_PUSH set) carry consume deliveries.
+    // They use corrId == 0 and are dispatched to the active push handler.
+    if (flags & FLAG_PUSH) {
+      this.pushHandler?.push(frame);
+      return;
+    }
+
+    // Regular request/response frame — dispatch by corrId.
     const entry = this.pending.get(corrId);
     if (!entry) {
-      // No registered handler — could be a keepalive or unknown push.
+      // No registered handler — could be a keepalive or unknown frame.
       return;
     }
 
     if (op === Op.ERROR) {
       const { code, message } = decodeErrorPayload(payload);
       const err = new RPCError(code, message);
-      if (entry.kind === "once") {
-        this.pending.delete(corrId);
-        entry.reject(err);
-      } else {
-        entry.end(err);
-      }
+      this.pending.delete(corrId);
+      entry.reject(err);
       return;
     }
 
-    if (entry.kind === "once") {
-      this.pending.delete(corrId);
-      entry.resolve(frame);
-    } else {
-      // stream: push delivers messages; anything else ends the stream
-      if (flags & FLAG_PUSH) {
-        entry.push(frame);
-      } else {
-        // Non-push frame on a stream corrId → stream ended cleanly by server
-        entry.end();
-      }
-    }
+    this.pending.delete(corrId);
+    entry.resolve(frame);
   }
 
   private onSocketError(err: Error): void {
     this._closed = true;
     const rpcErr = new FilaError(`connection error: ${err.message}`);
     for (const [, entry] of this.pending) {
-      if (entry.kind === "once") {
-        entry.reject(rpcErr);
-      } else {
-        entry.end(rpcErr);
-      }
+      entry.reject(rpcErr);
     }
     this.pending.clear();
+    this.pushHandler?.end(rpcErr);
+    this.pushHandler = null;
     this.emit("error", err);
   }
 
@@ -642,13 +671,11 @@ export class FibpConnection extends EventEmitter {
     this._closed = true;
     const rpcErr = new FilaError("connection closed by server");
     for (const [, entry] of this.pending) {
-      if (entry.kind === "once") {
-        entry.reject(rpcErr);
-      } else {
-        entry.end(rpcErr);
-      }
+      entry.reject(rpcErr);
     }
     this.pending.clear();
+    this.pushHandler?.end(rpcErr);
+    this.pushHandler = null;
     this.emit("close");
   }
 
