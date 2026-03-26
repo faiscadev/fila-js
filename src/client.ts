@@ -289,7 +289,13 @@ export class Client {
 
     // No batching: direct single-message ENQUEUE.
     const framePayload = encodeEnqueuePayload([{ queue, headers: headers ?? {}, payload }]);
-    const resp = await conn.request(Op.ENQUEUE, framePayload);
+    let resp;
+    try {
+      resp = await conn.request(Op.ENQUEUE, framePayload);
+    } catch (err) {
+      if (err instanceof RPCError) throw mapEnqueueWireError(err.code, err.detail);
+      throw err;
+    }
     const results = decodeEnqueueResponse(resp.payload);
     const result = results[0];
     if (!result) {
@@ -402,13 +408,6 @@ export class Client {
           // Non-push frame on stream = clean server-side close.
           break;
         }
-        if (frame.op === Op.ERROR) {
-          const { code, message } = {
-            code: frame.payload.readUInt16BE(0),
-            message: frame.payload.subarray(4).toString("utf8"),
-          };
-          throw mapConsumeWireError(code, message);
-        }
         const messages = decodeConsumeDelivery(frame.payload);
         for (const msg of messages) {
           yield {
@@ -421,6 +420,13 @@ export class Client {
           };
         }
       }
+    } catch (err) {
+      // Transport errors from the stream (e.g. ERROR frames) arrive as RPCError.
+      // Remap to typed SDK errors where possible.
+      if (err instanceof RPCError) {
+        throw mapConsumeWireError(err.code, err.detail);
+      }
+      throw err;
     } finally {
       conn.cancelStream(corrId);
     }
@@ -439,7 +445,13 @@ export class Client {
   async ack(queue: string, msgId: string): Promise<void> {
     const conn = await this.getConn();
     const payload = encodeAckPayload(queue, msgId);
-    const resp = await conn.request(Op.ACK, payload);
+    let resp;
+    try {
+      resp = await conn.request(Op.ACK, payload);
+    } catch (err) {
+      if (err instanceof RPCError) throw mapAckWireError(err.code, err.detail);
+      throw err;
+    }
     const results = decodeAckNackResponse(resp.payload);
     const result = results[0];
     if (!result) {
@@ -464,7 +476,13 @@ export class Client {
   async nack(queue: string, msgId: string, error: string): Promise<void> {
     const conn = await this.getConn();
     const payload = encodeNackPayload(queue, msgId, error);
-    const resp = await conn.request(Op.NACK, payload);
+    let resp;
+    try {
+      resp = await conn.request(Op.NACK, payload);
+    } catch (err) {
+      if (err instanceof RPCError) throw mapNackWireError(err.code, err.detail);
+      throw err;
+    }
     const results = decodeAckNackResponse(resp.payload);
     const result = results[0];
     if (!result) {

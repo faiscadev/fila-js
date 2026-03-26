@@ -210,8 +210,15 @@ export class Batcher {
       const payload = encodeEnqueuePayload(messages);
       respFrame = await conn.request(Op.ENQUEUE, payload);
     } catch (err) {
-      // Transport-level failure: all items in this batch get the error.
-      const mapped = err instanceof Error ? err : new RPCError(ErrCode.INTERNAL, String(err));
+      // Transport-level failure: remap typed errors then propagate to all batch items.
+      let mapped: Error;
+      if (err instanceof RPCError) {
+        mapped = mapEnqueueWireError(err.code, err.detail);
+      } else if (err instanceof Error) {
+        mapped = err;
+      } else {
+        mapped = new RPCError(ErrCode.INTERNAL, String(err));
+      }
       for (const item of items) {
         item.reject(mapped);
       }

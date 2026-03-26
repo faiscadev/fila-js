@@ -184,7 +184,14 @@ export async function startTestServer(
   }
 
   // Persistent admin connection.
-  const adminConn = await connectAdmin(addr, opts ?? {});
+  let adminConn: FibpConnection;
+  try {
+    adminConn = await connectAdmin(addr, opts ?? {});
+  } catch (err) {
+    proc.kill();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    throw new Error(`fila-server started but admin connection failed: ${err}`);
+  }
 
   return {
     addr,

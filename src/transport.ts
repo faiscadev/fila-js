@@ -599,8 +599,8 @@ export class FibpConnection extends EventEmitter {
     }
 
     if (op === Op.ERROR) {
-      const { message } = decodeErrorPayload(payload);
-      const err = new RPCError(ErrCode.INTERNAL, message);
+      const { code, message } = decodeErrorPayload(payload);
+      const err = new RPCError(code, message);
       if (entry.kind === "once") {
         this.pending.delete(corrId);
         entry.reject(err);

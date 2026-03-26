@@ -33,10 +33,13 @@ export class UnauthenticatedError extends FilaError {
 /** Raised for unexpected protocol-level failures, preserving the wire error code. */
 export class RPCError extends FilaError {
   public readonly code: number;
+  /** The raw error message from the server, without the code prefix. */
+  public readonly detail: string;
 
   constructor(code: number, message: string) {
     super(`rpc error (code = ${code}): ${message}`);
     this.name = "RPCError";
     this.code = code;
+    this.detail = message;
   }
 }
