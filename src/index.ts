@@ -5,5 +5,6 @@ export {
   FilaError,
   QueueNotFoundError,
   MessageNotFoundError,
+  UnauthenticatedError,
   RPCError,
 } from "./errors";

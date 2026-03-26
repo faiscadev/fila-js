@@ -3,8 +3,11 @@ import * as fs from "fs";
 import * as net from "net";
 import * as os from "os";
 import * as path from "path";
-import * as grpc from "@grpc/grpc-js";
-import * as protoLoader from "@grpc/proto-loader";
+import * as protobuf from "protobufjs";
+import {
+  FibpConnection,
+  Op,
+} from "../src/transport";
 
 const PROTO_DIR = path.join(__dirname, "..", "proto");
 
@@ -40,14 +43,86 @@ export interface TestServerOptions {
   extraConfig?: string;
   /** Environment variables to merge. */
   extraEnv?: Record<string, string>;
-  /** gRPC credentials for admin/readiness connections (default: insecure). */
-  adminCreds?: grpc.ChannelCredentials;
-  /** API key metadata to attach to admin RPCs. */
+  /** CA cert PEM for TLS admin connections. */
+  adminCaCert?: Buffer;
+  /** Client cert PEM for mTLS admin connections. */
+  adminClientCert?: Buffer;
+  /** Client key PEM for mTLS admin connections. */
+  adminClientKey?: Buffer;
+  /** API key to attach to admin requests. */
   adminApiKey?: string;
 }
 
 export const FILA_SERVER_BIN = findServerBinary();
 export const FILA_SERVER_AVAILABLE = fs.existsSync(FILA_SERVER_BIN);
+
+// ---- Protobuf loading -------------------------------------------------------
+
+let _adminRoot: protobuf.Root | null = null;
+
+function getAdminRoot(): protobuf.Root {
+  if (_adminRoot) return _adminRoot;
+  _adminRoot = new protobuf.Root();
+  _adminRoot.resolvePath = (_origin, target) => {
+    // Resolve google/protobuf includes from the protobufjs built-ins.
+    if (target.startsWith("google/")) {
+      return path.join(__dirname, "..", "node_modules", "protobufjs", target);
+    }
+    return path.join(PROTO_DIR, target);
+  };
+  _adminRoot.loadSync(path.join(PROTO_DIR, "fila", "v1", "admin.proto"));
+  _adminRoot.loadSync(path.join(PROTO_DIR, "fila", "v1", "messages.proto"));
+  return _adminRoot;
+}
+
+function encodeAdminMsg(typeName: string, fields: Record<string, unknown>): Buffer {
+  const root = getAdminRoot();
+  const MsgType = root.lookupType(typeName);
+  const err = MsgType.verify(fields);
+  if (err) throw new Error(`protobuf verify failed: ${err}`);
+  const msg = MsgType.create(fields);
+  return Buffer.from(MsgType.encode(msg).finish());
+}
+
+function decodeAdminMsg<T extends object>(typeName: string, buf: Buffer): T {
+  const root = getAdminRoot();
+  const MsgType = root.lookupType(typeName);
+  return MsgType.decode(buf) as unknown as T;
+}
+
+// ---- Admin FIBP helpers -----------------------------------------------------
+
+/** Connect to the server with optional TLS for admin use. */
+async function connectAdmin(addr: string, opts: TestServerOptions): Promise<FibpConnection> {
+  const lastColon = addr.lastIndexOf(":");
+  const host = addr.slice(0, lastColon);
+  const port = parseInt(addr.slice(lastColon + 1), 10);
+
+  return FibpConnection.connect({
+    host,
+    port,
+    tls: !!(opts.adminCaCert),
+    caCert: opts.adminCaCert,
+    clientCert: opts.adminClientCert,
+    clientKey: opts.adminClientKey,
+    apiKey: opts.adminApiKey,
+  });
+}
+
+async function callListQueues(conn: FibpConnection): Promise<void> {
+  const payload = encodeAdminMsg("fila.v1.ListQueuesRequest", {});
+  await conn.request(Op.LIST_QUEUES, payload);
+}
+
+async function callCreateQueue(conn: FibpConnection, name: string): Promise<void> {
+  const payload = encodeAdminMsg("fila.v1.CreateQueueRequest", {
+    name,
+    config: {},
+  });
+  await conn.request(Op.CREATE_QUEUE, payload);
+}
+
+// ---- TestServer factory -----------------------------------------------------
 
 export async function startTestServer(
   opts?: TestServerOptions
@@ -78,33 +153,25 @@ export async function startTestServer(
     stderrBuf += chunk.toString();
   });
 
-  const creds = opts?.adminCreds ?? grpc.credentials.createInsecure();
-  const adminMeta = new grpc.Metadata();
-  if (opts?.adminApiKey) {
-    adminMeta.set("authorization", `Bearer ${opts.adminApiKey}`);
-  }
-
-  // Wait for server ready. 20s to accommodate TLS + startup in CI.
+  // Wait for server ready — probe via FIBP ListQueues. 20s timeout.
   const deadline = Date.now() + 20000;
   let ready = false;
   let exited = false;
   proc.on("exit", () => { exited = true; });
 
-  // Create a fresh gRPC client per readiness probe. A persistent client can
-  // enter TRANSIENT_FAILURE with aggressive backoff after the first failed TLS
-  // handshake, preventing recovery. Fresh clients guarantee a clean attempt.
   let lastErr: unknown;
   while (Date.now() < deadline && !exited) {
-    const probeClient = createAdminClient(addr, creds);
+    let probeConn: FibpConnection | null = null;
     try {
-      await callListQueues(probeClient, adminMeta);
+      probeConn = await connectAdmin(addr, opts ?? {});
+      await callListQueues(probeConn);
       ready = true;
       break;
     } catch (err) {
       lastErr = err;
       await sleep(500);
     } finally {
-      probeClient.close();
+      probeConn?.destroy();
     }
   }
 
@@ -116,70 +183,19 @@ export async function startTestServer(
     throw new Error(`fila-server failed to start within 20s on ${addr}${detail}${probeDetail}`);
   }
 
-  const adminClient = createAdminClient(addr, creds);
+  // Persistent admin connection.
+  const adminConn = await connectAdmin(addr, opts ?? {});
 
   return {
     addr,
     dataDir,
     stop: () => {
       proc.kill();
-      adminClient.close();
+      adminConn.destroy();
       fs.rmSync(dataDir, { recursive: true, force: true });
     },
-    createQueue: (name: string) => {
-      return new Promise<void>((resolve, reject) => {
-        adminClient.createQueue(
-          { name, config: {} },
-          adminMeta,
-          (err: grpc.ServiceError | null) => {
-            if (err) reject(err);
-            else resolve();
-          }
-        );
-      });
-    },
+    createQueue: (name: string) => callCreateQueue(adminConn, name),
   };
-}
-
-function loadAdminProto(): grpc.ServiceClientConstructor {
-  const packageDef = protoLoader.loadSync(
-    [
-      path.join(PROTO_DIR, "fila", "v1", "admin.proto"),
-      path.join(PROTO_DIR, "fila", "v1", "messages.proto"),
-    ],
-    {
-      keepCase: false,
-      longs: String,
-      enums: String,
-      defaults: true,
-      oneofs: true,
-      includeDirs: [PROTO_DIR],
-    }
-  );
-  const proto = grpc.loadPackageDefinition(packageDef);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (proto.fila as any).v1.FilaAdmin as grpc.ServiceClientConstructor;
-}
-
-function createAdminClient(
-  addr: string,
-  creds: grpc.ChannelCredentials
-): grpc.Client {
-  const AdminService = loadAdminProto();
-  return new AdminService(addr, creds);
-}
-
-function callListQueues(
-  client: grpc.Client,
-  metadata: grpc.Metadata
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (client as any).listQueues({}, metadata, (err: grpc.ServiceError | null) => {
-      if (err) reject(err);
-      else resolve();
-    });
-  });
 }
 
 function sleep(ms: number): Promise<void> {
@@ -194,8 +210,6 @@ export function generateTestCerts(outputDir: string): {
   clientCert: Buffer;
   clientKey: Buffer;
 } {
-
-
   const caKeyPath = path.join(outputDir, "ca.key");
   const caCertPath = path.join(outputDir, "ca.pem");
   const serverKeyPath = path.join(outputDir, "server.key");
@@ -280,3 +294,6 @@ export function generateTestCerts(outputDir: string): {
     clientKey: fs.readFileSync(clientKeyPath),
   };
 }
+
+// Re-export for tests that decode admin responses.
+export { decodeAdminMsg, encodeAdminMsg };

@@ -22,7 +22,15 @@ export class MessageNotFoundError extends FilaError {
   }
 }
 
-/** Raised for unexpected gRPC failures, preserving status code and message. */
+/** Raised when the request is rejected due to missing or invalid credentials. */
+export class UnauthenticatedError extends FilaError {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnauthenticatedError";
+  }
+}
+
+/** Raised for unexpected protocol-level failures, preserving the wire error code. */
 export class RPCError extends FilaError {
   public readonly code: number;
 
