@@ -42,7 +42,7 @@ function mapEnqueueWireError(errCode: number, errMsg: string): Error {
  * Supports auto (opportunistic) and linger (timer-based) modes.
  */
 export class Batcher {
-  private readonly getConn: () => FibpConnection;
+  private readonly getConn: () => Promise<FibpConnection>;
   private readonly batchMode: BatchMode;
   private readonly maxBatchSize: number;
 
@@ -54,7 +54,7 @@ export class Batcher {
   private inFlightCount = 0;
 
   constructor(
-    getConn: () => FibpConnection,
+    getConn: () => Promise<FibpConnection>,
     batchMode: BatchMode
   ) {
     this.getConn = getConn;
@@ -206,7 +206,7 @@ export class Batcher {
 
     let respFrame;
     try {
-      const conn = this.getConn();
+      const conn = await this.getConn();
       const payload = encodeEnqueuePayload(messages);
       respFrame = await conn.request(Op.ENQUEUE, payload);
     } catch (err) {

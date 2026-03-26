@@ -64,6 +64,9 @@ function getAdminRoot(): protobuf.Root {
   if (_adminRoot) return _adminRoot;
   _adminRoot = new protobuf.Root();
   _adminRoot.resolvePath = (_origin, target) => {
+    // If the target is already an absolute path (e.g. the initial loadSync
+    // call), return it unchanged — prepending PROTO_DIR would double the path.
+    if (path.isAbsolute(target)) return target;
     // Resolve google/protobuf includes from the protobufjs built-ins.
     if (target.startsWith("google/")) {
       return path.join(__dirname, "..", "node_modules", "protobufjs", target);

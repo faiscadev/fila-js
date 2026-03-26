@@ -11,7 +11,6 @@ import {
   FibpConnection,
   Op,
   ErrCode,
-  FLAG_PUSH,
   encodeEnqueuePayload,
   decodeEnqueueResponse,
   encodeConsumePayload,
@@ -197,7 +196,7 @@ export class Client {
     }
 
     if (modeStr !== "disabled") {
-      this.batcher = new Batcher(() => this.getConnSync(), this.batchMode);
+      this.batcher = new Batcher(() => this.getConn(), this.batchMode);
     }
   }
 
@@ -223,25 +222,6 @@ export class Client {
       throw err;
     });
     return this.connectPromise;
-  }
-
-  /**
-   * Synchronous accessor for batcher use — returns the current connection or
-   * throws if not yet connected. The batcher calls this only after the first
-   * enqueue triggers a connection (via getConn()).
-   */
-  private getConnSync(): FibpConnection {
-    if (!this.conn || this.conn.closed) {
-      throw new FilaError("not connected: call enqueue/consume first or await getConn()");
-    }
-    return this.conn;
-  }
-
-  /**
-   * Ensure the connection is established. Called before batcher flushes.
-   */
-  private async ensureConnected(): Promise<void> {
-    await this.getConn();
   }
 
   /**
@@ -279,13 +259,15 @@ export class Client {
     headers: Record<string, string> | null,
     payload: Buffer
   ): Promise<string> {
-    const conn = await this.getConn();
-
-    // Route through batcher when enabled.
+    // When batching is enabled, submit synchronously (before any await) so
+    // that a concurrent close()/drain() cannot mark the batcher closed before
+    // this message is queued. The batcher calls getConn() asynchronously when
+    // it flushes, so no prior connection is needed here.
     if (this.batcher) {
-      // Batcher uses getConnSync() — connection is now established.
       return this.batcher.submit({ queue, headers: headers ?? {}, payload });
     }
+
+    const conn = await this.getConn();
 
     // No batching: direct single-message ENQUEUE.
     const framePayload = encodeEnqueuePayload([{ queue, headers: headers ?? {}, payload }]);
@@ -400,14 +382,13 @@ export class Client {
 
     const initialCredits = 256;
     const payload = encodeConsumePayload(queue, initialCredits);
-    const { corrId, iter } = conn.openStream(Op.CONSUME, payload);
 
+    let cancel: (() => void) | undefined;
     try {
-      for await (const frame of iter) {
-        if (!(frame.flags & FLAG_PUSH)) {
-          // Non-push frame on stream = clean server-side close.
-          break;
-        }
+      const stream = await conn.openConsumeStream(payload);
+      cancel = stream.cancel;
+
+      for await (const frame of stream.iter) {
         const messages = decodeConsumeDelivery(frame.payload);
         for (const msg of messages) {
           yield {
@@ -416,7 +397,7 @@ export class Client {
             payload: msg.payload,
             fairnessKey: msg.fairnessKey,
             attemptCount: msg.attemptCount,
-            queue: msg.queue,
+            queue,
           };
         }
       }
@@ -428,7 +409,7 @@ export class Client {
       }
       throw err;
     } finally {
-      conn.cancelStream(corrId);
+      cancel?.();
     }
   }
 

@@ -154,10 +154,11 @@ describe("transport unit tests (no server)", () => {
   });
 
   describe("decodeConsumeDelivery", () => {
-    it("decodes a pushed message frame", () => {
-      // Build a wire message manually.
+    it("decodes a pushed message frame (no queue field in wire format)", () => {
+      // Build a wire message manually — matching the server's encode_consume_push
+      // layout: id, fairness_key, attempt_count, headers, payload.
+      // The queue name is NOT in the push frame; callers inject it from context.
       const id = "test-id-001";
-      const queue = "my-queue";
       const fk = "tenant-A";
       const attemptCount = 2;
       const headerKey = "x-source";
@@ -180,7 +181,6 @@ describe("transport unit tests (no server)", () => {
       };
 
       pushField(id);
-      pushField(queue);
       pushField(fk);
 
       const attemptBuf = Buffer.allocUnsafe(4);
@@ -204,7 +204,6 @@ describe("transport unit tests (no server)", () => {
       expect(messages).toHaveLength(1);
       const msg = messages[0];
       expect(msg.id).toBe(id);
-      expect(msg.queue).toBe(queue);
       expect(msg.fairnessKey).toBe(fk);
       expect(msg.attemptCount).toBe(attemptCount);
       expect(msg.headers).toEqual({ [headerKey]: headerVal });
@@ -273,25 +272,40 @@ describe("transport unit tests (no server)", () => {
   });
 
   describe("auth payload encoding", () => {
-    it("encodes api key with length prefix", () => {
-      const payload = encodeAuthPayload("my-secret-key");
-      const kLen = payload.readUInt16BE(0);
-      const key = payload.subarray(2, 2 + kLen).toString();
-      expect(key).toBe("my-secret-key");
+    it("encodes api key as raw UTF-8 bytes (no length prefix)", () => {
+      const key = "my-secret-key";
+      const payload = encodeAuthPayload(key);
+      // The server reads the raw key bytes directly — no u16 length prefix.
+      expect(payload.toString("utf8")).toBe(key);
+      expect(payload.length).toBe(Buffer.byteLength(key, "utf8"));
     });
   });
 
   describe("decodeErrorPayload", () => {
-    it("decodes error code and message", () => {
+    it("decodes raw utf-8 error message and maps to INTERNAL for unknown messages", () => {
       const errMsg = "something went wrong";
-      const errBuf = Buffer.from(errMsg);
-      const buf = Buffer.allocUnsafe(4 + errBuf.length);
-      buf.writeUInt16BE(0xFFFF, 0);
-      buf.writeUInt16BE(errBuf.length, 2);
-      errBuf.copy(buf, 4);
-      const result = decodeErrorPayload(buf);
-      expect(result.code).toBe(0xFFFF);
+      const result = decodeErrorPayload(Buffer.from(errMsg, "utf8"));
       expect(result.message).toBe(errMsg);
+      expect(result.code).toBe(0xFFFF); // ErrCode.INTERNAL
+    });
+
+    it("maps auth error messages to UNAUTHORIZED code", () => {
+      const cases = [
+        "invalid or missing api key",
+        "authentication required: send OP_AUTH frame first",
+        "permission denied",
+        "unauthenticated operation attempt",
+      ];
+      for (const msg of cases) {
+        const result = decodeErrorPayload(Buffer.from(msg, "utf8"));
+        expect(result.code).toBe(0x0003); // ErrCode.UNAUTHORIZED
+        expect(result.message).toBe(msg);
+      }
+    });
+
+    it("maps queue not found messages to QUEUE_NOT_FOUND code", () => {
+      const result = decodeErrorPayload(Buffer.from("queue not found: my-queue", "utf8"));
+      expect(result.code).toBe(0x0001); // ErrCode.QUEUE_NOT_FOUND
     });
   });
 
