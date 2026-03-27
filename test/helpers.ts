@@ -1,15 +1,15 @@
-import { spawn, execFileSync } from "child_process";
+import { spawn } from "child_process";
 import * as fs from "fs";
+import { execFileSync } from "child_process";
 import * as net from "net";
 import * as os from "os";
 import * as path from "path";
-import * as protobuf from "protobufjs";
 import {
   FibpConnection,
   Op,
+  encodeFrame,
+  nextCorrId,
 } from "../src/transport";
-
-const PROTO_DIR = path.join(__dirname, "..", "proto");
 
 function findServerBinary(): string {
   if (process.env.FILA_SERVER_BIN) {
@@ -56,41 +56,34 @@ export interface TestServerOptions {
 export const FILA_SERVER_BIN = findServerBinary();
 export const FILA_SERVER_AVAILABLE = fs.existsSync(FILA_SERVER_BIN);
 
-// ---- Protobuf loading -------------------------------------------------------
+// ---- Binary admin encoding ---------------------------------------------------
 
-let _adminRoot: protobuf.Root | null = null;
-
-function getAdminRoot(): protobuf.Root {
-  if (_adminRoot) return _adminRoot;
-  _adminRoot = new protobuf.Root();
-  _adminRoot.resolvePath = (_origin, target) => {
-    // If the target is already an absolute path (e.g. the initial loadSync
-    // call), return it unchanged — prepending PROTO_DIR would double the path.
-    if (path.isAbsolute(target)) return target;
-    // Resolve google/protobuf includes from the protobufjs built-ins.
-    if (target.startsWith("google/")) {
-      return path.join(__dirname, "..", "node_modules", "protobufjs", target);
-    }
-    return path.join(PROTO_DIR, target);
-  };
-  _adminRoot.loadSync(path.join(PROTO_DIR, "fila", "v1", "admin.proto"));
-  _adminRoot.loadSync(path.join(PROTO_DIR, "fila", "v1", "messages.proto"));
-  return _adminRoot;
+/**
+ * Encode a CreateQueue request using the binary wire format.
+ *
+ * Wire format:
+ *   queue_len:u16 + queue:utf8
+ *   + on_enqueue_len:u16 + on_enqueue:utf8
+ *   + on_failure_len:u16 + on_failure:utf8
+ *   + visibility_timeout_ms:u32
+ */
+function encodeCreateQueuePayload(name: string): Buffer {
+  const nameBuf = Buffer.from(name, "utf8");
+  const buf = Buffer.allocUnsafe(2 + nameBuf.length + 2 + 2 + 4);
+  let off = 0;
+  buf.writeUInt16BE(nameBuf.length, off); off += 2;
+  nameBuf.copy(buf, off); off += nameBuf.length;
+  buf.writeUInt16BE(0, off); off += 2; // on_enqueue: empty
+  buf.writeUInt16BE(0, off); off += 2; // on_failure: empty
+  buf.writeUInt32BE(0, off); // visibility_timeout_ms: 0
+  return buf;
 }
 
-function encodeAdminMsg(typeName: string, fields: Record<string, unknown>): Buffer {
-  const root = getAdminRoot();
-  const MsgType = root.lookupType(typeName);
-  const err = MsgType.verify(fields);
-  if (err) throw new Error(`protobuf verify failed: ${err}`);
-  const msg = MsgType.create(fields);
-  return Buffer.from(MsgType.encode(msg).finish());
-}
-
-function decodeAdminMsg<T extends object>(typeName: string, buf: Buffer): T {
-  const root = getAdminRoot();
-  const MsgType = root.lookupType(typeName);
-  return MsgType.decode(buf) as unknown as T;
+/**
+ * Encode a ListQueues request (empty payload).
+ */
+function encodeListQueuesPayload(): Buffer {
+  return Buffer.alloc(0);
 }
 
 // ---- Admin FIBP helpers -----------------------------------------------------
@@ -113,15 +106,12 @@ async function connectAdmin(addr: string, opts: TestServerOptions): Promise<Fibp
 }
 
 async function callListQueues(conn: FibpConnection): Promise<void> {
-  const payload = encodeAdminMsg("fila.v1.ListQueuesRequest", {});
+  const payload = encodeListQueuesPayload();
   await conn.request(Op.LIST_QUEUES, payload);
 }
 
 async function callCreateQueue(conn: FibpConnection, name: string): Promise<void> {
-  const payload = encodeAdminMsg("fila.v1.CreateQueueRequest", {
-    name,
-    config: {},
-  });
+  const payload = encodeCreateQueuePayload(name);
   await conn.request(Op.CREATE_QUEUE, payload);
 }
 
@@ -304,6 +294,3 @@ export function generateTestCerts(outputDir: string): {
     clientKey: fs.readFileSync(clientKeyPath),
   };
 }
-
-// Re-export for tests that decode admin responses.
-export { decodeAdminMsg, encodeAdminMsg };
