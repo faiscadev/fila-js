@@ -23,7 +23,7 @@ export const Op = {
   ACK:          0x03,
   NACK:         0x04,
 
-  // Admin
+  // Admin (binary body)
   CREATE_QUEUE: 0x10,
   DELETE_QUEUE: 0x11,
   QUEUE_STATS:  0x12,

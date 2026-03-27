@@ -9,8 +9,7 @@
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
   "files": [
-    "dist/",
-    "proto/"
+    "dist/"
   ],
   "scripts": {
     "build": "tsc",
@@ -19,9 +18,7 @@
     "test": "vitest run"
   },
   "license": "AGPL-3.0-or-later",
-  "dependencies": {
-    "protobufjs": "^7.5.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
