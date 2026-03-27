@@ -28,9 +28,10 @@ export const Op = {
   DELETE_QUEUE: 0x11,
   QUEUE_STATS:  0x12,
   LIST_QUEUES:  0x13,
-  PAUSE_QUEUE:  0x14,
-  RESUME_QUEUE: 0x15,
-  REDRIVE:      0x16,
+  REDRIVE:      0x14,
+  CONFIG_SET:   0x15,
+  CONFIG_GET:   0x16,
+  CONFIG_LIST:  0x17,
 
   // Flow / keepalive
   FLOW:         0x20,
