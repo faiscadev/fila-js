@@ -2,9 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import * as grpc from "@grpc/grpc-js";
 import { Client } from "../src";
-import { RPCError } from "../src/errors";
 import {
   startTestServer,
   generateTestCerts,
@@ -31,6 +29,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
     it("enqueue succeeds with valid API key", async () => {
       await server.createQueue("auth-test-ok");
       const client = new Client(server.addr, { apiKey: BOOTSTRAP_KEY });
+      await client.connect();
       try {
         const msgId = await client.enqueue(
           "auth-test-ok",
@@ -43,37 +42,21 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
       }
     });
 
-    it("enqueue fails without API key (unauthenticated)", async () => {
-      await server.createQueue("auth-test-nokey");
+    it("connect fails without API key (unauthenticated)", async () => {
       const client = new Client(server.addr);
-      try {
-        await expect(
-          client.enqueue("auth-test-nokey", null, Buffer.from("fail"))
-        ).rejects.toSatisfy((err: unknown) => {
-          expect(err).toBeInstanceOf(RPCError);
-          expect((err as RPCError).code).toBe(grpc.status.UNAUTHENTICATED);
-          return true;
-        });
-      } finally {
-        await client.close();
-      }
+      // The handshake should be rejected without a valid API key.
+      await expect(client.connect()).rejects.toThrow();
     });
 
-    it("enqueue fails with wrong API key", async () => {
-      await server.createQueue("auth-test-badkey");
+    it("connect fails with wrong API key", async () => {
       const client = new Client(server.addr, { apiKey: "wrong-key" });
-      try {
-        await expect(
-          client.enqueue("auth-test-badkey", null, Buffer.from("fail"))
-        ).rejects.toThrow(RPCError);
-      } finally {
-        await client.close();
-      }
+      await expect(client.connect()).rejects.toThrow();
     });
 
     it("consume works with valid API key", async () => {
       await server.createQueue("auth-consume");
       const client = new Client(server.addr, { apiKey: BOOTSTRAP_KEY });
+      await client.connect();
       try {
         await client.enqueue("auth-consume", null, Buffer.from("msg"));
 
@@ -98,11 +81,8 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
       const certDir = fs.mkdtempSync(path.join(os.tmpdir(), "fila-tls-test-"));
       certs = generateTestCerts(certDir);
 
-      // Write server certs to a temp dir, then reference from config.
       const serverCertPath = path.join(certDir, "server.pem");
       const serverKeyPath = path.join(certDir, "server.key");
-
-      const adminCreds = grpc.credentials.createSsl(certs.caCert);
 
       server = await startTestServer({
         extraConfig: [
@@ -110,7 +90,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
           `cert_file = "${serverCertPath}"`,
           `key_file = "${serverKeyPath}"`,
         ].join("\n"),
-        adminCreds,
+        adminTls: { caCert: certs.caCert },
       });
     }, 30_000);
 
@@ -123,6 +103,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
       const client = new Client(server.addr, {
         caCert: certs.caCert,
       });
+      await client.connect();
       try {
         const msgId = await client.enqueue(
           "tls-test-ok",
@@ -138,13 +119,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
     it("fails without CA cert (insecure against TLS server)", async () => {
       await server.createQueue("tls-test-insecure");
       const client = new Client(server.addr);
-      try {
-        await expect(
-          client.enqueue("tls-test-insecure", null, Buffer.from("fail"))
-        ).rejects.toThrow();
-      } finally {
-        await client.close();
-      }
+      await expect(client.connect()).rejects.toThrow();
     });
   });
 
@@ -159,12 +134,6 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
       const serverKeyPath = path.join(certDir, "server.key");
       const caCertPath = path.join(certDir, "ca.pem");
 
-      const adminCreds = grpc.credentials.createSsl(
-        certs.caCert,
-        certs.clientKey,
-        certs.clientCert
-      );
-
       server = await startTestServer({
         extraConfig: [
           `[tls]`,
@@ -174,7 +143,11 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
           `[auth]`,
           `bootstrap_apikey = "${BOOTSTRAP_KEY}"`,
         ].join("\n"),
-        adminCreds,
+        adminTls: {
+          caCert: certs.caCert,
+          clientCert: certs.clientCert,
+          clientKey: certs.clientKey,
+        },
         adminApiKey: BOOTSTRAP_KEY,
       });
     }, 30_000);
@@ -191,6 +164,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         clientKey: certs.clientKey,
         apiKey: BOOTSTRAP_KEY,
       });
+      await client.connect();
       try {
         const msgId = await client.enqueue(
           "mtls-auth-ok",
@@ -211,6 +185,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
         clientKey: certs.clientKey,
         apiKey: BOOTSTRAP_KEY,
       });
+      await client.connect();
       try {
         const msgId = await client.enqueue(
           "mtls-full-flow",

@@ -4,7 +4,6 @@ import { Client } from "../src";
 describe("Batcher unit tests (no server)", () => {
   it("default batch mode is auto", () => {
     // Creating a client with default options should not throw.
-    // The batcher is initialized but won't do anything until enqueue is called.
     const client = new Client("localhost:9999");
     // close() should succeed even without a real server (just closes channel).
     client.close();
@@ -44,7 +43,6 @@ describe("Batcher unit tests (no server)", () => {
   it("close() resolves immediately when no pending messages", async () => {
     const client = new Client("localhost:9999");
     await client.close();
-    // Should not hang.
   });
 
   it("close() resolves immediately when batching is disabled", async () => {

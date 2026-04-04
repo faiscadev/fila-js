@@ -22,6 +22,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Client", () => {
     await server.createQueue("test-enqueue-ack");
 
     const client = new Client(server.addr);
+    await client.connect();
     try {
       const msgId = await client.enqueue(
         "test-enqueue-ack",
@@ -30,7 +31,6 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Client", () => {
       );
       expect(msgId).toBeTruthy();
 
-      // Consume one message then break.
       let received = false;
       for await (const msg of client.consume("test-enqueue-ack")) {
         expect(msg.id).toBe(msgId);
@@ -53,6 +53,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Client", () => {
     await server.createQueue("test-nack-redeliver");
 
     const client = new Client(server.addr);
+    await client.connect();
     try {
       await client.enqueue(
         "test-nack-redeliver",
@@ -60,7 +61,6 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Client", () => {
         Buffer.from("retry-me")
       );
 
-      // Keep the same stream open — redelivery arrives on the same stream.
       let deliveryCount = 0;
       for await (const msg of client.consume("test-nack-redeliver")) {
         if (deliveryCount === 0) {
@@ -83,6 +83,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Client", () => {
 
   it("enqueue to nonexistent queue throws QueueNotFoundError", async () => {
     const client = new Client(server.addr);
+    await client.connect();
     try {
       await expect(
         client.enqueue("no-such-queue", null, Buffer.from("fail"))

@@ -1,12 +1,10 @@
-import { spawn, execFileSync } from "child_process";
+import { spawn } from "child_process";
 import * as fs from "fs";
 import * as net from "net";
 import * as os from "os";
 import * as path from "path";
-import * as grpc from "@grpc/grpc-js";
-import * as protoLoader from "@grpc/proto-loader";
-
-const PROTO_DIR = path.join(__dirname, "..", "proto");
+import { execFileSync } from "child_process";
+import { Client } from "../src";
 
 function findServerBinary(): string {
   if (process.env.FILA_SERVER_BIN) {
@@ -40,10 +38,14 @@ export interface TestServerOptions {
   extraConfig?: string;
   /** Environment variables to merge. */
   extraEnv?: Record<string, string>;
-  /** gRPC credentials for admin/readiness connections (default: insecure). */
-  adminCreds?: grpc.ChannelCredentials;
-  /** API key metadata to attach to admin RPCs. */
+  /** API key for admin operations (used in handshake). */
   adminApiKey?: string;
+  /** TLS options for admin connections. */
+  adminTls?: {
+    caCert?: Buffer;
+    clientCert?: Buffer;
+    clientKey?: Buffer;
+  };
 }
 
 export const FILA_SERVER_BIN = findServerBinary();
@@ -78,33 +80,31 @@ export async function startTestServer(
     stderrBuf += chunk.toString();
   });
 
-  const creds = opts?.adminCreds ?? grpc.credentials.createInsecure();
-  const adminMeta = new grpc.Metadata();
-  if (opts?.adminApiKey) {
-    adminMeta.set("authorization", `Bearer ${opts.adminApiKey}`);
-  }
-
-  // Wait for server ready. 20s to accommodate TLS + startup in CI.
-  const deadline = Date.now() + 20000;
-  let ready = false;
   let exited = false;
   proc.on("exit", () => { exited = true; });
 
-  // Create a fresh gRPC client per readiness probe. A persistent client can
-  // enter TRANSIENT_FAILURE with aggressive backoff after the first failed TLS
-  // handshake, preventing recovery. Fresh clients guarantee a clean attempt.
+  // Wait for server ready by attempting a listQueues via FIBP.
+  const deadline = Date.now() + 20000;
+  let ready = false;
   let lastErr: unknown;
+
   while (Date.now() < deadline && !exited) {
-    const probeClient = createAdminClient(addr, creds);
     try {
-      await callListQueues(probeClient, adminMeta);
+      const probe = new Client(addr, {
+        apiKey: opts?.adminApiKey,
+        tls: !!opts?.adminTls,
+        caCert: opts?.adminTls?.caCert,
+        clientCert: opts?.adminTls?.clientCert,
+        clientKey: opts?.adminTls?.clientKey,
+      });
+      await probe.connect();
+      await probe.listQueues();
+      await probe.close();
       ready = true;
       break;
     } catch (err) {
       lastErr = err;
       await sleep(500);
-    } finally {
-      probeClient.close();
     }
   }
 
@@ -116,70 +116,28 @@ export async function startTestServer(
     throw new Error(`fila-server failed to start within 20s on ${addr}${detail}${probeDetail}`);
   }
 
-  const adminClient = createAdminClient(addr, creds);
+  // Create admin client for createQueue helper.
+  const adminClient = new Client(addr, {
+    apiKey: opts?.adminApiKey,
+    tls: !!opts?.adminTls,
+    caCert: opts?.adminTls?.caCert,
+    clientCert: opts?.adminTls?.clientCert,
+    clientKey: opts?.adminTls?.clientKey,
+  });
+  await adminClient.connect();
 
   return {
     addr,
     dataDir,
     stop: () => {
       proc.kill();
-      adminClient.close();
+      adminClient.close().catch(() => {});
       fs.rmSync(dataDir, { recursive: true, force: true });
     },
-    createQueue: (name: string) => {
-      return new Promise<void>((resolve, reject) => {
-        adminClient.createQueue(
-          { name, config: {} },
-          adminMeta,
-          (err: grpc.ServiceError | null) => {
-            if (err) reject(err);
-            else resolve();
-          }
-        );
-      });
+    createQueue: async (name: string) => {
+      await adminClient.createQueue(name);
     },
   };
-}
-
-function loadAdminProto(): grpc.ServiceClientConstructor {
-  const packageDef = protoLoader.loadSync(
-    [
-      path.join(PROTO_DIR, "fila", "v1", "admin.proto"),
-      path.join(PROTO_DIR, "fila", "v1", "messages.proto"),
-    ],
-    {
-      keepCase: false,
-      longs: String,
-      enums: String,
-      defaults: true,
-      oneofs: true,
-      includeDirs: [PROTO_DIR],
-    }
-  );
-  const proto = grpc.loadPackageDefinition(packageDef);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (proto.fila as any).v1.FilaAdmin as grpc.ServiceClientConstructor;
-}
-
-function createAdminClient(
-  addr: string,
-  creds: grpc.ChannelCredentials
-): grpc.Client {
-  const AdminService = loadAdminProto();
-  return new AdminService(addr, creds);
-}
-
-function callListQueues(
-  client: grpc.Client,
-  metadata: grpc.Metadata
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (client as any).listQueues({}, metadata, (err: grpc.ServiceError | null) => {
-      if (err) reject(err);
-      else resolve();
-    });
-  });
 }
 
 function sleep(ms: number): Promise<void> {
@@ -194,8 +152,6 @@ export function generateTestCerts(outputDir: string): {
   clientCert: Buffer;
   clientKey: Buffer;
 } {
-
-
   const caKeyPath = path.join(outputDir, "ca.key");
   const caCertPath = path.join(outputDir, "ca.pem");
   const serverKeyPath = path.join(outputDir, "server.key");
@@ -207,19 +163,16 @@ export function generateTestCerts(outputDir: string): {
   const serverExtPath = path.join(outputDir, "server-ext.cnf");
   const clientExtPath = path.join(outputDir, "client-ext.cnf");
 
-  // Write server SAN extension config.
   fs.writeFileSync(
     serverExtPath,
     "subjectAltName=IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth\n"
   );
 
-  // Write client extension config (rustls requires clientAuth EKU).
   fs.writeFileSync(
     clientExtPath,
     "extendedKeyUsage=clientAuth\n"
   );
 
-  // CA key + cert.
   execFileSync(
     "openssl",
     [
@@ -230,7 +183,6 @@ export function generateTestCerts(outputDir: string): {
     { stdio: "ignore" }
   );
 
-  // Server key + CSR + cert signed by CA.
   execFileSync(
     "openssl",
     [
@@ -251,7 +203,6 @@ export function generateTestCerts(outputDir: string): {
     { stdio: "ignore" }
   );
 
-  // Client key + CSR + cert signed by CA.
   execFileSync(
     "openssl",
     [

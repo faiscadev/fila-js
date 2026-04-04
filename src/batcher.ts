@@ -1,9 +1,14 @@
-import * as grpc from "@grpc/grpc-js";
-
-import { QueueNotFoundError, RPCError } from "./errors";
+import {
+  Encoder,
+  Decoder,
+  OP_ENQUEUE,
+  OP_ENQUEUE_RESULT,
+  OP_ERROR,
+  ERR_OK,
+} from "./fibp";
+import { ProtocolError, mapErrorCode, mapItemErrorCode } from "./errors";
 import type { EnqueueMessage } from "./types";
-import type { FilaServiceClient } from "../generated/fila/v1/FilaService";
-import type { EnqueueResponse__Output } from "../generated/fila/v1/EnqueueResponse";
+import type { Connection } from "./connection";
 
 /** Controls how the SDK batches enqueue() calls. */
 export type BatchMode =
@@ -19,31 +24,12 @@ interface BatchItem {
 }
 
 /**
- * Map a per-message EnqueueResult error to an SDK error.
- * The unified proto uses typed EnqueueError with an error code.
- */
-function mapResultError(code: string, message: string): Error {
-  if (code === "ENQUEUE_ERROR_CODE_QUEUE_NOT_FOUND") {
-    return new QueueNotFoundError(`enqueue: ${message}`);
-  }
-  return new RPCError(grpc.status.INTERNAL, message);
-}
-
-function mapTransportError(err: grpc.ServiceError): Error {
-  if (err.code === grpc.status.NOT_FOUND) {
-    return new QueueNotFoundError(`enqueue: ${err.details}`);
-  }
-  return new RPCError(err.code, err.details);
-}
-
-/**
  * Background batcher that collects enqueue() calls and flushes them
- * via the unified Enqueue RPC (which accepts repeated messages).
+ * via the FIBP Enqueue opcode (batch-native).
  * Supports auto (opportunistic) and linger (timer-based) modes.
  */
 export class Batcher {
-  private readonly grpcClient: FilaServiceClient;
-  private readonly callMetadata: () => grpc.Metadata;
+  private readonly conn: Connection;
   private readonly batchMode: BatchMode;
   private readonly maxBatchSize: number;
 
@@ -54,13 +40,8 @@ export class Batcher {
   private lingerTimer: ReturnType<typeof setTimeout> | null = null;
   private inFlightCount = 0;
 
-  constructor(
-    grpcClient: FilaServiceClient,
-    callMetadata: () => grpc.Metadata,
-    batchMode: BatchMode
-  ) {
-    this.grpcClient = grpcClient;
-    this.callMetadata = callMetadata;
+  constructor(conn: Connection, batchMode: BatchMode) {
+    this.conn = conn;
     this.batchMode = batchMode;
 
     if (batchMode.mode === "auto") {
@@ -72,15 +53,10 @@ export class Batcher {
     }
   }
 
-  /**
-   * Submit a message for batched enqueue. Returns a promise that resolves
-   * with the message ID when the batch containing this message is flushed.
-   */
+  /** Submit a message for batched enqueue. */
   submit(message: EnqueueMessage): Promise<string> {
     if (this.closed) {
-      return Promise.reject(
-        new RPCError(grpc.status.UNAVAILABLE, "batcher is closed")
-      );
+      return Promise.reject(new ProtocolError(0xff, "batcher is closed"));
     }
 
     return new Promise<string>((resolve, reject) => {
@@ -89,10 +65,7 @@ export class Batcher {
     });
   }
 
-  /**
-   * Drain all pending messages before closing. Returns a promise that
-   * resolves when all pending messages have been flushed.
-   */
+  /** Drain all pending messages before closing. */
   async drain(): Promise<void> {
     this.closed = true;
 
@@ -101,7 +74,7 @@ export class Batcher {
       this.lingerTimer = null;
     }
 
-    if (this.pending.length === 0) {
+    if (this.pending.length === 0 && this.inFlightCount === 0) {
       return;
     }
 
@@ -119,12 +92,6 @@ export class Batcher {
     }
   }
 
-  /**
-   * Auto mode: schedule a flush via setImmediate. Messages that arrive
-   * within the same event loop turn will cluster into the same batch.
-   * At low load, each message is sent individually. At high load,
-   * messages naturally batch together.
-   */
   private scheduleAutoFlush(): void {
     if (this.flushScheduled) return;
     this.flushScheduled = true;
@@ -135,14 +102,9 @@ export class Batcher {
     });
   }
 
-  /**
-   * Linger mode: start a timer on the first message. Flush when the batch
-   * fills or the timer fires, whichever comes first.
-   */
   private scheduleLingerFlush(): void {
     if (this.batchMode.mode !== "linger") return;
 
-    // If batch is full, flush immediately.
     if (this.pending.length >= this.batchMode.batchSize) {
       if (this.lingerTimer !== null) {
         clearTimeout(this.lingerTimer);
@@ -152,7 +114,6 @@ export class Batcher {
       return;
     }
 
-    // Start timer if not already running.
     if (this.lingerTimer === null) {
       this.lingerTimer = setTimeout(() => {
         this.lingerTimer = null;
@@ -161,9 +122,6 @@ export class Batcher {
     }
   }
 
-  /**
-   * Flush all pending items, splitting into maxBatchSize chunks.
-   */
   private flushAll(): void {
     while (this.pending.length > 0) {
       const items = this.pending.splice(0, this.maxBatchSize);
@@ -173,7 +131,6 @@ export class Batcher {
         this.notifyDrainComplete();
       });
     }
-    // Also check drain in case pending was already empty and nothing in-flight.
     this.notifyDrainComplete();
   }
 
@@ -186,59 +143,59 @@ export class Batcher {
     }
   }
 
-  /**
-   * Flush a batch of items via the unified Enqueue RPC (repeated messages).
-   * All items -- single or multiple -- use the same RPC.
-   */
-  private flushBatch(items: BatchItem[]): Promise<void> {
-    if (items.length === 0) return Promise.resolve();
+  private async flushBatch(items: BatchItem[]): Promise<void> {
+    if (items.length === 0) return;
 
-    const messages = items.map((item) => ({
-      queue: item.message.queue,
-      headers: item.message.headers,
-      payload: item.message.payload,
-    }));
+    const enc = new Encoder(256);
+    enc.writeU32(items.length);
+    for (const item of items) {
+      enc.writeString(item.message.queue);
+      enc.writeMap(item.message.headers);
+      enc.writeBytes(item.message.payload);
+    }
 
-    return new Promise<void>((resolve) => {
-      this.grpcClient.enqueue(
-        { messages },
-        this.callMetadata(),
-        (err: grpc.ServiceError | null, resp?: EnqueueResponse__Output) => {
-          if (err) {
-            // Transport-level failure: all items get the error.
-            const mapped = mapTransportError(err);
-            for (const item of items) {
-              item.reject(mapped);
-            }
-          } else {
-            const results = resp!.results;
-            for (let i = 0; i < items.length; i++) {
-              const result = results[i];
-              if (!result) {
-                items[i].reject(
-                  new RPCError(
-                    grpc.status.INTERNAL,
-                    "server returned fewer results than messages sent"
-                  )
-                );
-                continue;
-              }
-              if (result.result === "messageId" && result.messageId) {
-                items[i].resolve(result.messageId);
-              } else if (result.result === "error" && result.error) {
-                items[i].reject(
-                  mapResultError(result.error.code, result.error.message)
-                );
-              } else {
-                items[i].reject(
-                  new RPCError(grpc.status.INTERNAL, "no result from server")
-                );
-              }
-            }
-          }
-          resolve();
+    try {
+      const resp = await this.conn.sendRequest(OP_ENQUEUE, enc.finish());
+
+      if (resp.opcode === OP_ERROR) {
+        const dec = new Decoder(resp.payload);
+        const errorCode = dec.readU8();
+        const message = dec.readString();
+        const metadata = dec.readMap();
+        const err = mapErrorCode(errorCode, message, metadata);
+        for (const item of items) {
+          item.reject(err);
         }
-      );
-    });
+        return;
+      }
+
+      if (resp.opcode !== OP_ENQUEUE_RESULT) {
+        const err = new ProtocolError(0xff, `unexpected response opcode: 0x${resp.opcode.toString(16)}`);
+        for (const item of items) {
+          item.reject(err);
+        }
+        return;
+      }
+
+      const dec = new Decoder(resp.payload);
+      const count = dec.readU32();
+      for (let i = 0; i < items.length; i++) {
+        if (i >= count) {
+          items[i].reject(new ProtocolError(0xff, "server returned fewer results than messages sent"));
+          continue;
+        }
+        const errorCode = dec.readU8();
+        const messageId = dec.readString();
+        if (errorCode === ERR_OK) {
+          items[i].resolve(messageId);
+        } else {
+          items[i].reject(mapItemErrorCode(errorCode, "enqueue"));
+        }
+      }
+    } catch (err) {
+      for (const item of items) {
+        item.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
   }
 }

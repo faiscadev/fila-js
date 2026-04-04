@@ -6,6 +6,7 @@ import {
   FILA_SERVER_AVAILABLE,
   type TestServer,
 } from "./helpers";
+import type { ClientOptions } from "../src/client";
 
 describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
   let server: TestServer;
@@ -19,10 +20,11 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
   });
 
   describe("enqueueMany", () => {
-    it("enqueues multiple messages in a single RPC", async () => {
+    it("enqueues multiple messages in a single request", async () => {
       await server.createQueue("multi-enqueue");
 
       const client = new Client(server.addr, { batchMode: "disabled" });
+      await client.connect();
       try {
         const results = await client.enqueueMany([
           { queue: "multi-enqueue", headers: { idx: "0" }, payload: Buffer.from("msg-0") },
@@ -59,6 +61,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
       await server.createQueue("multi-partial");
 
       const client = new Client(server.addr, { batchMode: "disabled" });
+      await client.connect();
       try {
         const results = await client.enqueueMany([
           { queue: "multi-partial", headers: {}, payload: Buffer.from("ok") },
@@ -80,6 +83,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
       await server.createQueue("multi-order");
 
       const client = new Client(server.addr, { batchMode: "disabled" });
+      await client.connect();
       try {
         const results = await client.enqueueMany([
           { queue: "multi-order", headers: {}, payload: Buffer.from("first") },
@@ -103,6 +107,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
       await server.createQueue("auto-batch");
 
       const client = new Client(server.addr);
+      await client.connect();
       try {
         const msgId = await client.enqueue(
           "auto-batch",
@@ -130,9 +135,8 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
       await server.createQueue("auto-concurrent");
 
       const client = new Client(server.addr);
+      await client.connect();
       try {
-        // Fire multiple enqueues concurrently — they should batch together
-        // since they arrive within the same event loop turn.
         const promises = Array.from({ length: 5 }, (_, i) =>
           client.enqueue(
             "auto-concurrent",
@@ -146,7 +150,6 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
         for (const id of messageIds) {
           expect(id).toBeTruthy();
         }
-        // All IDs should be unique.
         expect(new Set(messageIds).size).toBe(5);
       } finally {
         await client.close();
@@ -155,9 +158,8 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
 
     it("preserves QueueNotFoundError for single-item batches", async () => {
       const client = new Client(server.addr);
+      await client.connect();
       try {
-        // Single message to nonexistent queue: should get QueueNotFoundError
-        // because the per-result error code is mapped to QueueNotFoundError.
         await expect(
           client.enqueue("no-such-queue-auto", null, Buffer.from("fail"))
         ).rejects.toThrow(QueueNotFoundError);
@@ -172,6 +174,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
       await server.createQueue("no-batch");
 
       const client = new Client(server.addr, { batchMode: "disabled" });
+      await client.connect();
       try {
         const msgId = await client.enqueue(
           "no-batch",
@@ -196,6 +199,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
 
     it("enqueue to nonexistent queue throws QueueNotFoundError", async () => {
       const client = new Client(server.addr, { batchMode: "disabled" });
+      await client.connect();
       try {
         await expect(
           client.enqueue("no-such-queue-disabled", null, Buffer.from("fail"))
@@ -215,6 +219,7 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
         lingerMs: 50,
         batchSize: 100,
       });
+      await client.connect();
       try {
         const msgId = await client.enqueue(
           "linger-batch",
@@ -232,9 +237,10 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
 
       const client = new Client(server.addr, {
         batchMode: "linger",
-        lingerMs: 5000, // Long timer — batch should flush by size first.
+        lingerMs: 5000,
         batchSize: 3,
       });
+      await client.connect();
       try {
         const promises = Array.from({ length: 3 }, (_, i) =>
           client.enqueue(
@@ -266,23 +272,22 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
       await server.createQueue("close-drain");
 
       const client = new Client(server.addr);
+      await client.connect();
 
-      // Enqueue a message and immediately close.
       const enqueuePromise = client.enqueue(
         "close-drain",
         null,
         Buffer.from("drained")
       );
 
-      // Close should wait for pending messages.
       await client.close();
 
-      // The enqueue should have completed before close returned.
       const msgId = await enqueuePromise;
       expect(msgId).toBeTruthy();
 
       // Verify the message arrived at the server.
       const verifyClient = new Client(server.addr, { batchMode: "disabled" });
+      await verifyClient.connect();
       try {
         let received = false;
         for await (const msg of verifyClient.consume("close-drain")) {
@@ -299,6 +304,3 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
     });
   });
 });
-
-// Import ClientOptions type for the constructor test.
-import type { ClientOptions } from "../src/client";
