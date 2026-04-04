@@ -95,6 +95,11 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("Enqueue operations", () => {
         expect(results[1].success).toBe(true);
         if (results[0].success && results[1].success) {
           expect(results[0].messageId).not.toBe(results[1].messageId);
+          // Verify ordering: first result corresponds to first input, second to second.
+          expect(typeof results[0].messageId).toBe("string");
+          expect(typeof results[1].messageId).toBe("string");
+          // IDs are server-assigned in order; the first enqueue should get a smaller ID.
+          expect(results[0].messageId < results[1].messageId).toBe(true);
         }
       } finally {
         await client.close();

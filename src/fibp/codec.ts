@@ -26,7 +26,7 @@ export class Encoder {
   private grow(needed: number): void {
     const remaining = this.buf.length - this.pos;
     if (remaining >= needed) return;
-    let newSize = this.buf.length * 2;
+    let newSize = Math.max(this.buf.length * 2, 16);
     while (newSize - this.pos < needed) newSize *= 2;
     const next = Buffer.allocUnsafe(newSize);
     this.buf.copy(next, 0, 0, this.pos);

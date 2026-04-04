@@ -51,6 +51,10 @@ export class Batcher {
     } else {
       this.maxBatchSize = 1;
     }
+
+    if (this.maxBatchSize <= 0) {
+      throw new Error(`batch size must be greater than 0, got ${this.maxBatchSize}`);
+    }
   }
 
   /** Submit a message for batched enqueue. */

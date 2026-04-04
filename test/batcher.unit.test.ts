@@ -2,16 +2,16 @@ import { describe, it, expect } from "vitest";
 import { Client } from "../src";
 
 describe("Batcher unit tests (no server)", () => {
-  it("default batch mode is auto", () => {
+  it("default batch mode is auto", async () => {
     // Creating a client with default options should not throw.
     const client = new Client("localhost:9999");
     // close() should succeed even without a real server (just closes channel).
-    client.close();
+    await client.close();
   });
 
-  it("disabled batch mode creates no batcher", () => {
+  it("disabled batch mode creates no batcher", async () => {
     const client = new Client("localhost:9999", { batchMode: "disabled" });
-    client.close();
+    await client.close();
   });
 
   it("auto batch mode with custom maxBatchSize", () => {

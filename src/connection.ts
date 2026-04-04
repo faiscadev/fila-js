@@ -264,7 +264,7 @@ export class Connection extends EventEmitter {
   /** Allocate the next request ID. Wraps at 2^32. */
   allocRequestId(): number {
     const id = this.nextRequestId;
-    this.nextRequestId = (this.nextRequestId + 1) & 0xffffffff;
+    this.nextRequestId = ((this.nextRequestId + 1) & 0xffffffff) >>> 0;
     if (this.nextRequestId === 0) this.nextRequestId = 1;
     return id;
   }
@@ -338,13 +338,13 @@ export class Connection extends EventEmitter {
   /** Gracefully close the connection. */
   async close(): Promise<void> {
     if (this.closed) return;
-    this.closed = true;
     this.stopPing();
     try {
       this.sendRaw(encodeFrame(OP_DISCONNECT, 0, 0, Buffer.alloc(0)));
     } catch {
       // Ignore write errors on close.
     }
+    this.closed = true;
     this.socket?.destroy();
     this.socket = null;
     // Reject all pending.

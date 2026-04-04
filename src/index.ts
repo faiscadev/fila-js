@@ -20,4 +20,5 @@ export {
   ApiKeyNotFoundError,
   ChannelFullError,
   ProtocolError,
+  ProtocolError as RPCError,
 } from "./errors";

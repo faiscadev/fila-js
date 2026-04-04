@@ -45,12 +45,20 @@ describe.skipIf(!FILA_SERVER_AVAILABLE)("TLS + API key auth", () => {
     it("connect fails without API key (unauthenticated)", async () => {
       const client = new Client(server.addr);
       // The handshake should be rejected without a valid API key.
-      await expect(client.connect()).rejects.toThrow();
+      try {
+        await expect(client.connect()).rejects.toThrow();
+      } finally {
+        await client.close();
+      }
     });
 
     it("connect fails with wrong API key", async () => {
       const client = new Client(server.addr, { apiKey: "wrong-key" });
-      await expect(client.connect()).rejects.toThrow();
+      try {
+        await expect(client.connect()).rejects.toThrow();
+      } finally {
+        await client.close();
+      }
     });
 
     it("consume works with valid API key", async () => {

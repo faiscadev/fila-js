@@ -89,22 +89,23 @@ export async function startTestServer(
   let lastErr: unknown;
 
   while (Date.now() < deadline && !exited) {
+    const probe = new Client(addr, {
+      apiKey: opts?.adminApiKey,
+      tls: !!opts?.adminTls,
+      caCert: opts?.adminTls?.caCert,
+      clientCert: opts?.adminTls?.clientCert,
+      clientKey: opts?.adminTls?.clientKey,
+    });
     try {
-      const probe = new Client(addr, {
-        apiKey: opts?.adminApiKey,
-        tls: !!opts?.adminTls,
-        caCert: opts?.adminTls?.caCert,
-        clientCert: opts?.adminTls?.clientCert,
-        clientKey: opts?.adminTls?.clientKey,
-      });
       await probe.connect();
       await probe.listQueues();
-      await probe.close();
       ready = true;
       break;
     } catch (err) {
       lastErr = err;
       await sleep(500);
+    } finally {
+      await probe.close();
     }
   }
 
@@ -124,7 +125,13 @@ export async function startTestServer(
     clientCert: opts?.adminTls?.clientCert,
     clientKey: opts?.adminTls?.clientKey,
   });
-  await adminClient.connect();
+  try {
+    await adminClient.connect();
+  } catch (err) {
+    proc.kill();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    throw err;
+  }
 
   return {
     addr,

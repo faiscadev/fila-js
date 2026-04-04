@@ -88,8 +88,19 @@ export interface ClientOptions {
   batchSize?: number;
 }
 
-/** Parse "host:port" into components. Default port 5555. */
+/** Parse "host:port" into components. Default port 5555. Handles IPv6 "[host]:port". */
 function parseAddr(addr: string): { host: string; port: number } {
+  // IPv6 bracket notation: [::1]:5555
+  if (addr.startsWith("[")) {
+    const closeBracket = addr.indexOf("]");
+    if (closeBracket === -1) return { host: addr, port: 5555 };
+    const host = addr.substring(1, closeBracket);
+    if (closeBracket + 1 < addr.length && addr[closeBracket + 1] === ":") {
+      const port = parseInt(addr.substring(closeBracket + 2), 10);
+      return { host, port: isNaN(port) ? 5555 : port };
+    }
+    return { host, port: 5555 };
+  }
   const lastColon = addr.lastIndexOf(":");
   if (lastColon === -1) return { host: addr, port: 5555 };
   const host = addr.substring(0, lastColon);
@@ -132,6 +143,7 @@ export class Client {
   private readonly batcher: Batcher | null;
   private readonly batchModeConfig: "auto" | "linger" | "disabled";
   private readonly clientOptions: ClientOptions;
+  private readonly leaderConns: Set<Connection> = new Set();
 
   /**
    * Create a client for the given address. Call `connect()` to establish the connection.
@@ -196,6 +208,11 @@ export class Client {
     if (this.batcher) {
       await this.batcher.drain();
     }
+    // Close any leader connections opened by consume redirects.
+    for (const lc of this.leaderConns) {
+      await lc.close();
+    }
+    this.leaderConns.clear();
     await this.conn.close();
   }
 
@@ -380,6 +397,7 @@ export class Client {
   ): AsyncIterable<ConsumeMessage> {
     const { host, port } = parseAddr(leaderAddr);
     const leaderConn = new Connection(host, port, this.connOpts);
+    this.leaderConns.add(leaderConn);
     try {
       await leaderConn.connect();
       const enc = new Encoder(64);
@@ -411,6 +429,10 @@ export class Client {
       );
       assertNotError(consumeResp);
 
+      if (consumeResp.opcode !== OP_CONSUME_OK) {
+        throw new ProtocolError(0xff, `unexpected consume response: 0x${consumeResp.opcode.toString(16)}`);
+      }
+
       while (!streamClosed && !leaderConn.isClosed) {
         if (deliveryQueue.length === 0) {
           await new Promise<void>((resolve) => {
@@ -429,6 +451,7 @@ export class Client {
       leaderConn.sendFireAndForget(OP_CANCEL_CONSUME, requestId, Buffer.alloc(0));
       leaderConn.unregisterConsumeHandler(requestId);
     } finally {
+      this.leaderConns.delete(leaderConn);
       await leaderConn.close();
     }
   }
